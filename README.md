@@ -1,26 +1,22 @@
-# Vorbei...
+# Goal
 
-Leider besitze ich keinen Ora Funky Cat mehr, daher wird die Entwicklung hier nicht mehr weitergehen. Wenn das jemand übernehmen möchte - immer gern.
+This is an application to publish the current status of a GWM ORA Funky Cat via MQTT and to send commands to the car via MQTT.
 
-# Ziel
+# I want to contribute...
 
-Hier entsteht eine Anwendung um den aktuellen Status eines GWM ORA Funky Cat per MQTT zu veröffentlichen und über MQTT Befehle an das Auto zu senden.
+Very welcome! I currently don't have a plan for the next steps. Therefore, it's best if you [open an issue](https://github.com/moryoav/ora2mqtt/issues/new) and tell us what you plan to do, what you can do, what you want, what you need...
 
-# Ich will mitmachen...
+What I did to get to the current state can be found under [How to...?](#how-to)
 
-Sehr gern! Ich hab aktuell auch noch keinen Plan, was die nächsten Schritte sind. Daher ist es am besten wenn du [einen Issue aufmachst](https://github.com/zivillian/ora2mqtt/issues/new) und sagst was du vorhast, kannst, willst, brauchst...
-
-Was ich gemacht habe um zu dem aktuellen Stand zu kommen findest du unter [How to...?](#how-to)
-
-Falls du dabei Hilfe brauchst, kannst du auch einfach [einen Issue aufmachst](https://github.com/zivillian/ora2mqtt/issues/new).
+If you need help with this, you can also simply [open an issue](https://github.com/moryoav/ora2mqtt/issues/new).
 
 # Status
 
-Es gibt eine Kommandozeilenanwendung die unter Windows läuft und die aktuellen Werte auslesen und per MQTT veröffentlichen kann.
+There is a command-line application that runs on Windows and can read the current values and publish them via MQTT.
 
-Im ersten Schritt muss die Konfigurationsdatei mit `ora2mqtt configure` erstellt werden. Dafür am besten einen zusätzlichen Account anlegen und das Auto für diesen Account freigeben. Anschließend kann die Anwendung mit `ora2mqtt run` oder einfach `ora2mqtt` gestartet werden. Damit sollten die aktuellen Werte im MQTT zu sehen sein.
+In the first step, the configuration file must be created with `ora2mqtt configure`. It's best to create an additional account and share the car with this account. Afterwards, the application can be started with `ora2mqtt run` or simply `ora2mqtt`. This should make the current values visible in MQTT.
 
-Die Werte (SOC, Range und Odometer) können in [evcc](https://github.com/evcc-io/evcc/) mit der folgenden Konfiguration eingebunden werden:
+The values (SOC, Range, and Odometer) can be integrated into [evcc](https://github.com/evcc-io/evcc/) with the following configuration:
 
 ```yaml
 vehicles:
@@ -43,13 +39,13 @@ vehicles:
     timeout: 1m
 ```
 
-Ich habe das inzwischen auch ein paar Stunden laufen lassen, während ich mit dem Auto unterwegs war. Die Daten werden auch dann übermittelt, wenn die offizielle App nicht genutzt wird. Auch der Token Refresh war erfolgreich.
+I have now let it run for a few hours while I was on the road with the car. The data is also transmitted when the official app is not being used. The token refresh was also successful.
 
 ## Linux
 
-Damit die Binaries unter Linux laufen, muss das root Zertifikat installiert werden. Dazu das [`gwm_root.pem`](libgwmapi/Resources/gwm_root.pem) Zertifikat aus dem Repository herunterladen und mit `sudo cp gwm_root.pem /etc/ssl/certs/` in den Zertifikate Ordner des Systems kopieren.
+For the binaries to run under Linux, the root certificate must be installed. Download the [`gwm_root.pem`](libgwmapi/Resources/gwm_root.pem) certificate from the repository and copy it to the system's certificate folder with `sudo cp gwm_root.pem /etc/ssl/certs/`.
 
-Außerdem muss die [`openssl.cnf`](openssl.cnf) aus dem Repository heruntergeladen werden. Danach kann man die Binaries aus dem Release mit dem folgen Skript starten.
+Additionally, the [`openssl.cnf`](openssl.cnf) must be downloaded from the repository. Afterwards, the binaries from the release can be started with the following script.
 
 ```
 #/bin/bash
@@ -65,39 +61,39 @@ do
 done
 ```
 
-Das Skript startet das Programm in einer Endlosschleife neu, falls die Verbindung verloren wird. Außerdem wird das Polling-Interval von 10s auf 60s erhöht um die Anzahl der Anfragen an den GMW Server zu reduzieren.
+The script restarts the program in an endless loop if the connection is lost. In addition, the polling interval is increased from 10s to 60s to reduce the number of requests to the GMW server.
 
 ## Docker
 
-Inzwischen gibt es auch einen Docker Container. Die config muss vorher mit `ora2mqtt configure` erstellt werden:
+There is now also a Docker container. The config must be created beforehand with `ora2mqtt configure`:
 
 ```bash
-docker run -d --restart=unless-stopped -v ./ora2mqtt.yml:/config/ora2mqtt.yml zivillian/ora2mqtt:latest
+docker run -d --restart=unless-stopped -v ./ora2mqtt.yml:/config/ora2mqtt.yml moryoav/ora2mqtt:latest
 ```
 
-# Datenpunkte
+# Data points
 
-Folgende Datenpunkte kann ich auslesen:
+I can read the following data points:
 
-| Datenpunkt | Beschreibung
+| Data point | Description
 | ---------- | ------------
-| 2011501    | Reichweite in km
+| 2011501    | Range in km
 | 2013021    | SOC
-| 2013022    | verbleibende Ladedauer in Minuten
+| 2013022    | remaining charging time in minutes
 | 2013023    | 
-| 2041142    | Ladevorgang aktiv
+| 2041142    | Charging active
 | 2041301    | SOCE
 | 2042071    | 
-| 2042082    | bool Flag, nur aktiv wenn geladen wird (aber nicht immer)
+| 2042082    | bool flag, only active when charging (but not always)
 | 2078020    | 
-| 2101001    | Reifendruck vl in kPa
-| 2101002    | Reifendruck vr in kPa
-| 2101003    | Reifendruck hl in kPa
-| 2101004    | Reifendruck hr in kPa
-| 2101005    | Reifentemperatur vl in °C
-| 2101006    | Reifentemperatur vr in °C
-| 2101007    | Reifentemperatur hl in °C
-| 2101008    | Reifentemperatur hr in °C
+| 2101001    | Tire pressure front left in kPa
+| 2101002    | Tire pressure front right in kPa
+| 2101003    | Tire pressure rear left in kPa
+| 2101004    | Tire pressure rear right in kPa
+| 2101005    | Tire temperature front left in °C
+| 2101006    | Tire temperature front right in °C
+| 2101007    | Tire temperature rear left in °C
+| 2101008    | Tire temperature rear right in °C
 | 2102001    | 
 | 2102002    | 
 | 2102003    | 
@@ -106,14 +102,14 @@ Folgende Datenpunkte kann ich auslesen:
 | 2102008    | 
 | 2102009    | 
 | 2102010    | 
-| 2103010    | Kilometerstand in km
-| 2201001    | Innenraumtemperatur in zehntel °C
-| 2202001    | Klimaanlage an
-| 2208001    | Schloss offen
-| 2210001    | Fenster geschlossen vl
-| 2210002    | Fenster geschlossen vr
-| 2210003    | Fenster geschlossen hl
-| 2210004    | Fenster geschlossen hr
+| 2103010    | Odometer in km
+| 2201001    | Interior temperature in tenths of °C
+| 2202001    | Air conditioning on
+| 2208001    | Lock open
+| 2210001    | Window closed front left
+| 2210002    | Window closed front right
+| 2210003    | Window closed rear left
+| 2210004    | Window closed rear right
 | 2210010    | 
 | 2210011    | 
 | 2210012    | 
@@ -123,82 +119,82 @@ Folgende Datenpunkte kann ich auslesen:
 
 # How it started?
 
-Bei evcc hat [jemand vorgeschlagen](https://github.com/evcc-io/evcc/discussions/9524#discussioncomment-6832420), dass man sich die App mal anschauen müsste...
+In evcc, [someone suggested](https://github.com/evcc-io/evcc/discussions/9524#discussioncomment-6832420) that we should take a look at the app...
 
 # How it's going...
 
-## Endpunkte
+## Endpoints
 
-Es gibt mind. 4 API Endpunkte (für jede Region):
+There are at least 4 API endpoints (for each region):
 
 ### https://eu-h5-gateway.gwmcloud.com
 
-Das ist der Standard Endpunkt für die App. Hier findet die Authentifizierung statt, wird das User Profil verwaltet und früher gab es auch mal eine _Community_.
+This is the standard endpoint for the app. Authentication takes place here, the user profile is managed, and there used to be a _Community_.
 
 ### https://eu-app-gateway.gwmcloud.com
 
-Über den Endpunkt findet die Kommunikation mit dem Auto statt. Dieser Endpunkt benötigt ein Client Zertifikat der GWM CA. Glücklicherweise liefert die APP [eins mit](#client-cert) das funktioniert.
+Communication with the car takes place via this endpoint. This endpoint requires a client certificate from the GWM CA. Fortunately, the APP provides [one](#client-cert) that works.
 
 ### https://eu-data-upload-gateway.gwmcloud.com
 
-Hier wird initial die Konfiguration für das tracking abgerufen und dann jeder Klick in der App als gzipped Json hochgeladen.
+The configuration for tracking is initially retrieved here, and then every click in the app is uploaded as gzipped JSON.
 
 ### https://eu-app-gateway-common.gwmcloud.com
 
-Bisher ist nur ein Request bekannt, über den sich die App ein individuelles Zertifikat ausstellt das für den Zugriff auf den `eu-app-gateway` Endpunkt genutzt wird.
+So far, only one request is known, through which the app issues an individual certificate that is used to access the `eu-app-gateway` endpoint.
 
-## HTTP Header
+## HTTP Headers
 
-Jede Anfrage enthält sehr viele nicht standardisierte HTTP Header. Nicht alle werden benötigt, daher hier nur die relevanten:
+Each request contains many non-standardized HTTP headers. Not all are needed, so here are only the relevant ones:
 
-|Name       |Value     |Beschreibung                                                          |
+|Name       |Value     |Description                                                          |
 |-----------|----------|----------------------------------------------------------------------|
 |Rs         |         2|                                                             required |
 |Terminal   |GW_APP_ORA|                                                             required |
 |Brand      |         3|                                                             required |
-|accessToken|       JWT|                                                   Ergebnis vom Login |
-|language   | de/en/...| beeinflusst Fehlermeldungen und muss für einige Request gesetzt sein |
+|accessToken|       JWT|                                                   Result from login |
+|language   | de/en/...| affects error messages and must be set for some requests |
 |systemType |         1|                                                   sometimes required |
-|country    |        DE|             wenn sich der Wert ändert, wird das accessToken ungültig |
+|country    |        DE|             if the value changes, the accessToken becomes invalid |
 
-Wenn die Header fehlen liefert die API nur einen Fehler zurück. Manchmal steht drin, welcher Header fehlt.
+If the headers are missing, the API only returns an error. Sometimes it indicates which header is missing.
 
 ## Cert pinning
 
-Das Root Zertifikat für den `eu-app-gateway` Endpunkt ist in der App gepinnt. Dafür bringt die App das Global Sign Root Zertifikat als Ressource mit (`res/raw/globalsign_chain.crt`). Wenn das in der App (in Version 1.8.1) ersetzt wird, kann der Traffic mit [mitmproxy](https://mitmproxy.org/) mitgeschnitten werden.
+The root certificate for the `eu-app-gateway` endpoint is pinned in the app. For this, the app includes the Global Sign Root certificate as a resource (`res/raw/globalsign_chain.crt`). If this is replaced in the app (in version 1.8.1), the traffic can be intercepted with [mitmproxy](https://mitmproxy.org/).
 
 ## Client Cert
 
-Der `eu-app-gateway` Endpunkt benötigt ein Client Zertifikat von der GWM CA. Die App enthält bereits ein Zertifikat. `assets/gwm_general.cer` enthält das Zertifikat, `assets/gwm_general.key` den dazu passenden private key und `assets/gwm_root.pem` die Zertifikatskette bis zur GWM CA.
+The `eu-app-gateway` endpoint requires a client certificate from the GWM CA. The app already contains a certificate. `assets/gwm_general.cer` contains the certificate, `assets/gwm_general.key` the corresponding private key, and `assets/gwm_root.pem` the certificate chain up to the GWM CA.
 
-Bei der ersten Anmeldung stellt sich die App ein eigenes Zertifikat aus. Das Zertfikat wird lokal auf dem Gerät abgelegt und kann ausgelesen werden, wenn das `android:debuggable` Flag gesetzt wurde.
+Upon first login, the app issues its own certificate. The certificate is stored locally on the device and can be read if the `android:debuggable` flag is set.
 
-Das Zertifikat liegt im Speicher unter `files/pki/cert/cert`, dazu gehören noch die Dateien `files/pkey_data11`, `files/pkey_data21` und `files/pkey_data31`. Die `1` steht dabei für das n-te Zertifikat (weil das irgendwann abläuft und erneuert werden muss). Der mitgeliefert Key wird in der Datei `files/pkey_data30` abgelegt.
+The certificate is stored in memory under `files/pki/cert/cert`, along with the files `files/pkey_data11`, `files/pkey_data21`, and `files/pkey_data31`. The `1` stands for the n-th certificate (because it eventually expires and needs to be renewed). The supplied key is stored in the file `files/pkey_data30`.
 
 ### pkey_data1x
 
-Das ist der Public Key.
+This is the Public Key.
 
 ### pkey_data2x
 
-Das ist auch der Public Key, aber der RSA Parameter e wurde _transformiert_.
+This is also the Public Key, but the RSA parameter e has been _transformed_.
 
 ### pkey_data3x
 
-Das ist der Private Key - der RSA Parameter d wurde _transformiert_.
+This is the Private Key - the RSA parameter d has been _transformed_.
 
 ### _Transformation_
 
-Sowohl die mitgelieferten Schlüssel, als auch die Schlüssel des erstellten Client Zertifikats sind _transformiert_. Zusätzlich werden nur die RSA Parameter n, d und e abgespeichert - die weiteren Parameter p,q, dp, dq und qInv müssen berechnet werden. Der Code um die Transformation rückgängig zu machen und die fehlenden Paramter zu berechnen liegt in [CertificateHandler.cs](libgwmapi/CertificateHandler.cs).
+Both the supplied keys and the keys of the created client certificate are _transformed_. Additionally, only the RSA parameters n, d, and e are stored - the other parameters p, q, dp, dq, and qInv must be calculated. The code to reverse the transformation and calculate the missing parameters is in [CertificateHandler.cs](libgwmapi/CertificateHandler.cs).
 
-Alternativ geht das auch in python mit [cryptography.hazmat.primitives.asymmetric.rsa](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/rsa/#handling-partial-rsa-private-keys).
+Alternatively, this can also be done in Python with [cryptography.hazmat.primitives.asymmetric.rsa](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/rsa/#handling-partial-rsa-private-keys).
 
 # How to...?
 
-Ich habe die App mit [apktool](https://apktool.org/) zerlegt und wieder zusammengebaut. Damit lassen sich die Zertifikate auslesen und ersetzen. Um zu verstehen, was in den Zertifikaten drin steht und was wie _transformiert_ wird, war [asn1js](https://lapo.it/asn1js) sehr hilfreich.
+I disassembled and reassembled the app with [apktool](https://apktool.org/). This allows the certificates to be read and replaced. To understand what's in the certificates and what is _transformed_ and how, [asn1js](https://lapo.it/asn1js) was very helpful.
 
-Um die modifizierte App installieren zu können, muss sie signiert sein - das geht relativ einfach mit [uber-apk-signer](https://github.com/patrickfav/uber-apk-signer/).
+To be able to install the modified app, it must be signed - this is relatively easy with [uber-apk-signer](https://github.com/patrickfav/uber-apk-signer/).
 
-Den Traffic kann man mit [mitmproxy](https://mitmproxy.org/) mitlesen. Dabei muss das Root Zertifikat auf dem Gerät oder Emulator [installiert werden](https://docs.mitmproxy.org/stable/concepts-certificates/#installing-the-mitmproxy-ca-certificate-manually) und das Client Zertifikat aus der App [extrahiert](#client-cert), [_transformiert_](#transformation) und [mit angegeben](https://docs.mitmproxy.org/stable/concepts-certificates/#using-a-client-side-certificate) werden.
+The traffic can be monitored with [mitmproxy](https://mitmproxy.org/). The root certificate must be [installed](https://docs.mitmproxy.org/stable/concepts-certificates/#installing-the-mitmproxy-ca-certificate-manually) on the device or emulator, and the client certificate from the app must be [extracted](#client-cert), [_transformed_](#transformation), and [specified](https://docs.mitmproxy.org/stable/concepts-certificates/#using-a-client-side-certificate).
 
-Die App bringt einige native Binaries mit (relevant sind `libbean.so` und `libbeancrypto.so`) - da werden auch die Zertifikate und Private Keys verarbeitet. Mit [Ghidra](https://ghidra-sre.org/) lässt sich das aber sehr gut untersuchen. Für den Crypto Part wird [libtomcrypt](https://github.com/libtom/libtomcrypt/) genutzt - damit lässt sich dann auch die _Transformation_ der RSA Parameter nachvollziehen.
+The app includes some native binaries (relevant are `libbean.so` and `libbeancrypto.so`) - certificates and private keys are also processed there. However, this can be investigated very well with [Ghidra](https://ghidra-sre.org/). For the crypto part, [libtomcrypt](https://github.com/libtom/libtomcrypt/) is used - which also allows understanding the _transformation_ of the RSA parameters.
