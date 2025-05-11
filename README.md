@@ -2,6 +2,10 @@
 
 This is an application to publish the current status of a GWM ORA Funky Cat via MQTT and to send commands to the car via MQTT.
 
+# Deep Gratitude
+
+Special thanks goes to the original creator, @zivillian (https://github.com/zivillian/ora2mqtt), who unfortunately stopped working on the original project. I'm trying to continue here where he left off.
+
 # I want to contribute...
 
 Very welcome! I currently don't have a plan for the next steps. Therefore, it's best if you [open an issue](https://github.com/moryoav/ora2mqtt/issues/new) and tell us what you plan to do, what you can do, what you want, what you need...
@@ -38,8 +42,6 @@ vehicles:
     topic: GWM/<vehicleId>/status/items/2103010/value
     timeout: 1m
 ```
-
-I have now let it run for a few hours while I was on the road with the car. The data is also transmitted when the official app is not being used. The token refresh was also successful.
 
 ## Linux
 
