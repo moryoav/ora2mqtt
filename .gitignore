@@ -42,3 +42,5 @@ msbuild.log
 msbuild.err
 msbuild.wrn
 /ora2mqtt/Properties/launchSettings.json
+
+*.bat

@@ -8,6 +8,8 @@ using libgwmapi.DTO.UserAuth;
 using libgwmapi.DTO.Vehicle;
 using Microsoft.Extensions.Logging;
 using ora2mqtt.Logging;
+using System.Text.Json.Serialization;
+using System.Buffers;
 
 namespace ora2mqtt;
 
@@ -87,16 +89,59 @@ public class RunCommand:BaseCommand
             client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, options, cancellationToken);
             await client.SubscribeAsync($"{options.HomeAssistantDiscoveryTopic}/status", cancellationToken: cancellationToken);
         }
+        // Subscribe to AC command topic
+        await client.SubscribeAsync("GWM/+/command/ac", cancellationToken: cancellationToken);
         return client;
     }
 
-    private Task OnMessageAsync(MqttApplicationMessageReceivedEventArgs arg, IMqttClient mqtt, GwmApiClient api, Ora2MqttMqttOptions options, CancellationToken cancellationToken)
+    private async Task OnMessageAsync(MqttApplicationMessageReceivedEventArgs arg, IMqttClient mqtt, GwmApiClient api, Ora2MqttMqttOptions options, CancellationToken cancellationToken)
     {
         if (arg.ApplicationMessage.Topic == $"{options.HomeAssistantDiscoveryTopic}/status")
         {
-            return PublishStatusAsync(mqtt, api, options, true, cancellationToken);
+            await PublishStatusAsync(mqtt, api, options, true, cancellationToken);
+            return;
         }
-        return Task.CompletedTask;
+
+        // Handle AC commands
+        if (arg.ApplicationMessage.Topic.StartsWith("GWM/") && arg.ApplicationMessage.Topic.EndsWith("/command/ac"))
+        {
+            try
+            {
+                var vin = arg.ApplicationMessage.Topic.Split('/')[1];
+                var payload = System.Text.Encoding.UTF8.GetString(arg.ApplicationMessage.Payload.FirstSpan);
+                var command = JsonSerializer.Deserialize<AcCommand>(payload);
+
+                // Create the AC command request
+                var request = new SendCmd
+                {
+                    Instructions = new SendCmdInstruction
+                    {
+                        X04 = new Instruction0x04
+                        {
+                            AirConditioner = new AirConditionerInstruction
+                            {
+                                OperationTime = command.OperationTime,
+                                SwitchOrder = command.SwitchOrder,
+                                Temperature = command.Temperature
+                            }
+                        }
+                    },
+                    RemoteType = "0",
+                    Type = 2,
+                    Vin = vin
+                };
+
+                // Send the command to the car
+                await api.SendCmdAsync(request, cancellationToken);
+
+                // Publish status update to confirm the command was sent
+                await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Failed to process AC command: {ex.Message}");
+            }
+        }
     }
 
     private GwmApiClient GetGwmApiClient(Ora2MqttOptions options)
@@ -345,10 +390,23 @@ public class RunCommand:BaseCommand
                     p = "binary_sensor",
                     unique_id = $"gwm_{vehicle.Vin}_2202001",
                     state_topic = $"{topicPrefix}/items/2202001/value",
-                    name = "A/C",
+                    name = "A/C Status",
                     payload_off = "0",
                     payload_on = "1",
                     icon= "mdi:air-conditioner"
+                },
+                ac_switch = new
+                {
+                    p = "switch",
+                    unique_id = $"gwm_{vehicle.Vin}_ac_switch",
+                    state_topic = $"{topicPrefix}/items/2202001/value",
+                    command_topic = $"GWM/{vehicle.Vin}/command/ac",
+                    name = "A/C Control",
+                    payload_off = "{\"switchOrder\":\"0\",\"temperature\":\"22\",\"operationTime\":\"30\"}",
+                    payload_on = "{\"switchOrder\":\"1\",\"temperature\":\"22\",\"operationTime\":\"30\"}",
+                    icon = "mdi:air-conditioner",
+                    optimistic = false,
+                    retain = false
                 },
                 status_2208001 = new
                 {
@@ -452,5 +510,17 @@ public class RunCommand:BaseCommand
             .WithPayload(payload)
             .Build();
         return client.PublishAsync(message, cancellationToken);
+    }
+
+    private class AcCommand
+    {
+        [JsonPropertyName("temperature")]
+        public string Temperature { get; set; }
+
+        [JsonPropertyName("operationTime")]
+        public string OperationTime { get; set; }
+
+        [JsonPropertyName("switchOrder")]
+        public string SwitchOrder { get; set; }
     }
 }
