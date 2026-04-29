@@ -17,6 +17,9 @@ public class RunCommand:BaseCommand
 {
     private const string DefaultAcTemperature = "22";
     private const string DefaultAcOperationTime = "30";
+    private const string LockCommandPayload = "LOCK";
+    private const string UnlockCommandPayload = "UNLOCK";
+    private const string WindowClosePayload = "PRESS";
 
     private ILogger _logger;
     private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
@@ -89,21 +92,22 @@ public class RunCommand:BaseCommand
             }
         };
 
+        client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, config, cancellationToken);
         await client.ConnectAsync(builder.Build(), cancellationToken);
         if (options.HomeAssistantDiscoveryTopic is not null)
         {
-            client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, config, cancellationToken);
             await client.SubscribeAsync($"{options.HomeAssistantDiscoveryTopic}/status", cancellationToken: cancellationToken);
         }
-        // Subscribe to A/C command topics (legacy switch + climate topics).
-        await client.SubscribeAsync("GWM/+/command/ac/#", cancellationToken: cancellationToken);
+        // Subscribe to remote command topics.
+        await client.SubscribeAsync("GWM/+/command/#", cancellationToken: cancellationToken);
         return client;
     }
 
     private async Task OnMessageAsync(MqttApplicationMessageReceivedEventArgs arg, IMqttClient mqtt, GwmApiClient api, Ora2MqttOptions config, CancellationToken cancellationToken)
     {
         var options = config.Mqtt;
-        if (arg.ApplicationMessage.Topic == $"{options.HomeAssistantDiscoveryTopic}/status")
+        if (options.HomeAssistantDiscoveryTopic is not null &&
+            arg.ApplicationMessage.Topic == $"{options.HomeAssistantDiscoveryTopic}/status")
         {
             await PublishStatusAsync(mqtt, api, options, true, cancellationToken);
             return;
@@ -205,6 +209,56 @@ public class RunCommand:BaseCommand
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to process AC temperature command on topic {Topic}", arg.ApplicationMessage.Topic);
+            }
+
+            return;
+        }
+
+        if (arg.ApplicationMessage.Topic.EndsWith("/command/lock", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var switchOrder = payload.Trim().ToUpperInvariant() switch
+                {
+                    LockCommandPayload => "2",
+                    UnlockCommandPayload => "1",
+                    _ => null
+                };
+
+                if (switchOrder is null)
+                {
+                    _logger.LogError("Failed to process lock command for {Vin}: unsupported payload '{Payload}'", vin, payload);
+                    return;
+                }
+
+                await SendLockCommandAsync(api, config, vin, switchOrder, cancellationToken);
+                await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to process lock command on topic {Topic}", arg.ApplicationMessage.Topic);
+            }
+
+            return;
+        }
+
+        if (arg.ApplicationMessage.Topic.EndsWith("/command/windows/close", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                if (!String.IsNullOrWhiteSpace(payload) &&
+                    !WindowClosePayload.Equals(payload.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogError("Failed to process window close command for {Vin}: unsupported payload '{Payload}'", vin, payload);
+                    return;
+                }
+
+                await SendWindowCloseCommandAsync(api, config, vin, cancellationToken);
+                await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to process window close command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
         }
     }
@@ -503,6 +557,31 @@ public class RunCommand:BaseCommand
                     optimistic = false,
                     retain = false
                 },
+                door_lock = new
+                {
+                    p = "lock",
+                    unique_id = $"gwm_{vehicle.Vin}_door_lock",
+                    state_topic = $"{topicPrefix}/items/2208001/value",
+                    command_topic = $"GWM/{vehicle.Vin}/command/lock",
+                    name = "Door Lock",
+                    payload_lock = LockCommandPayload,
+                    payload_unlock = UnlockCommandPayload,
+                    state_locked = "0",
+                    state_unlocked = "1",
+                    icon = "mdi:car-door-lock",
+                    optimistic = false,
+                    retain = false
+                },
+                windows_close = new
+                {
+                    p = "button",
+                    unique_id = $"gwm_{vehicle.Vin}_windows_close",
+                    command_topic = $"GWM/{vehicle.Vin}/command/windows/close",
+                    name = "Close Windows",
+                    payload_press = WindowClosePayload,
+                    icon = "mdi:window-closed-variant",
+                    retain = false
+                },
                 status_2208001 = new
                 {
                     p = "binary_sensor",
@@ -653,11 +732,72 @@ public class RunCommand:BaseCommand
         }, cancellationToken);
     }
 
+    private async Task SendLockCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, CancellationToken cancellationToken)
+    {
+        var securityPassword = GetSecurityPassword(config, vin, "lock");
+        if (securityPassword is null)
+        {
+            return;
+        }
+
+        var request = new SendCmd
+        {
+            Instructions = new SendCmdInstruction
+            {
+                X05 = new Instruction0x05
+                {
+                    OperationTime = "0",
+                    SwitchOrder = switchOrder
+                }
+            },
+            RemoteType = "0",
+            SecurityPassword = securityPassword,
+            Type = 2,
+            Vin = vin
+        };
+
+        await api.SendCmdAsync(request, cancellationToken);
+    }
+
+    private async Task SendWindowCloseCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, CancellationToken cancellationToken)
+    {
+        var securityPassword = GetSecurityPassword(config, vin, "window close");
+        if (securityPassword is null)
+        {
+            return;
+        }
+
+        var request = new SendCmd
+        {
+            Instructions = new SendCmdInstruction
+            {
+                X08 = new Instruction0x08
+                {
+                    SwitchOrder = "0",
+                    Window = new WindowInstruction
+                    {
+                        LeftFront = "0",
+                        LeftBack = "0",
+                        RightFront = "0",
+                        RightBack = "0",
+                        SkyLight = String.Empty
+                    }
+                }
+            },
+            RemoteType = "0",
+            SecurityPassword = securityPassword,
+            Type = 2,
+            Vin = vin
+        };
+
+        await api.SendCmdAsync(request, cancellationToken);
+    }
+
     private async Task SendAcCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, string temperature, string operationTime, CancellationToken cancellationToken)
     {
-        if (String.IsNullOrWhiteSpace(config.Account.SecurityPin))
+        var securityPassword = GetSecurityPassword(config, vin, "AC");
+        if (securityPassword is null)
         {
-            _logger.LogError("Failed to process AC command for {Vin}: account.securityPin is not configured", vin);
             return;
         }
 
@@ -679,12 +819,23 @@ public class RunCommand:BaseCommand
                 }
             },
             RemoteType = "0",
-            SecurityPassword = new CheckSecurityPassword(config.Account.SecurityPin).Md5Hash,
+            SecurityPassword = securityPassword,
             Type = 2,
             Vin = vin
         };
 
         await api.SendCmdAsync(request, cancellationToken);
+    }
+
+    private string GetSecurityPassword(Ora2MqttOptions config, string vin, string commandName)
+    {
+        if (String.IsNullOrWhiteSpace(config.Account.SecurityPin))
+        {
+            _logger.LogError("Failed to process {CommandName} command for {Vin}: account.securityPin is not configured", commandName, vin);
+            return null;
+        }
+
+        return new CheckSecurityPassword(config.Account.SecurityPin).Md5Hash;
     }
 
     private AcSettings GetAcSettings(string vin)
