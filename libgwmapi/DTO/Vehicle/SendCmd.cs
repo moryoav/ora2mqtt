@@ -34,6 +34,12 @@ public class SendCmdInstruction
 {
     [JsonPropertyName("0x04")]
     public Instruction0x04 X04 { get; set; }
+
+    [JsonPropertyName("0x05")]
+    public Instruction0x05 X05 { get; set; }
+
+    [JsonPropertyName("0x08")]
+    public Instruction0x08 X08 { get; set; }
 }
 
 public class Instruction0x04
@@ -52,4 +58,40 @@ public class AirConditionerInstruction
 
     [JsonPropertyName("temperature")]
     public string Temperature { get; set; }
+}
+
+public class Instruction0x05
+{
+    [JsonPropertyName("operationTime")]
+    public string OperationTime { get; set; }
+
+    [JsonPropertyName("switchOrder")]
+    public string SwitchOrder { get; set; }
+}
+
+public class Instruction0x08
+{
+    [JsonPropertyName("switchOrder")]
+    public string SwitchOrder { get; set; }
+
+    [JsonPropertyName("window")]
+    public WindowInstruction Window { get; set; }
+}
+
+public class WindowInstruction
+{
+    [JsonPropertyName("leftFront")]
+    public string LeftFront { get; set; }
+
+    [JsonPropertyName("leftBack")]
+    public string LeftBack { get; set; }
+
+    [JsonPropertyName("rightFront")]
+    public string RightFront { get; set; }
+
+    [JsonPropertyName("rightBack")]
+    public string RightBack { get; set; }
+
+    [JsonPropertyName("skyLight")]
+    public string SkyLight { get; set; }
 }

@@ -29,6 +29,11 @@ public partial class GwmApiClient
         return PostAppAsync("vehicle/T5/sendCmd", request, cancellationToken);
     }
 
+    public Task SendRawCmdAsync<TRequest>(TRequest request, CancellationToken cancellationToken)
+    {
+        return PostAppAsync("vehicle/T5/sendCmd", request, cancellationToken);
+    }
+
     public Task<RemoteCtrlResultT5[]> GetRemoteCtrlResultAsync(string seqNo, CancellationToken cancellationToken)
     {
         return GetAppAsync<RemoteCtrlResultT5[]>($"vehicle/getRemoteCtrlResultT5?seqNo={seqNo}", cancellationToken);
