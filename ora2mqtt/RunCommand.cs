@@ -30,7 +30,9 @@ public class RunCommand:BaseCommand
             return 1;
         }
         Ora2MqttOptions config;
-        var deserializer = new Deserializer();
+        var deserializer = new DeserializerBuilder()
+            .WithCaseInsensitivePropertyMatching()
+            .Build();
         using (var file = File.OpenText(ConfigFile))
         {
             config = deserializer.Deserialize<Ora2MqttOptions>(file);

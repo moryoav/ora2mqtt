@@ -30,7 +30,9 @@ namespace ora2mqtt
             }
             else
             {
-                var deserializer = new Deserializer();
+                var deserializer = new DeserializerBuilder()
+                    .WithCaseInsensitivePropertyMatching()
+                    .Build();
                 using (var file = File.OpenText(ConfigFile))
                 {
                     config = deserializer.Deserialize<Ora2MqttOptions>(file);
