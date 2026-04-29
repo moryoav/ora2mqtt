@@ -15,7 +15,11 @@ namespace ora2mqtt;
 [Verb("run", true, HelpText = "default")]
 public class RunCommand:BaseCommand
 {
+    private const string DefaultAcTemperature = "22";
+    private const string DefaultAcOperationTime = "30";
+
     private ILogger _logger;
+    private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
 
     [Option('i', "interval", Default = 10, HelpText = "GWM API polling interval")]
     public int Intervall { get; set; }
@@ -91,8 +95,8 @@ public class RunCommand:BaseCommand
             client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, config, cancellationToken);
             await client.SubscribeAsync($"{options.HomeAssistantDiscoveryTopic}/status", cancellationToken: cancellationToken);
         }
-        // Subscribe to AC command topic
-        await client.SubscribeAsync("GWM/+/command/ac", cancellationToken: cancellationToken);
+        // Subscribe to A/C command topics (legacy switch + climate topics).
+        await client.SubscribeAsync("GWM/+/command/ac/#", cancellationToken: cancellationToken);
         return client;
     }
 
@@ -105,55 +109,102 @@ public class RunCommand:BaseCommand
             return;
         }
 
-        // Handle AC commands
-        if (arg.ApplicationMessage.Topic.StartsWith("GWM/") && arg.ApplicationMessage.Topic.EndsWith("/command/ac"))
+        var topicParts = arg.ApplicationMessage.Topic.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (topicParts.Length < 4 || !"GWM".Equals(topicParts[0], StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var vin = topicParts[1];
+        var payload = System.Text.Encoding.UTF8.GetString(arg.ApplicationMessage.Payload.FirstSpan);
+
+        if (arg.ApplicationMessage.Topic.EndsWith("/command/ac", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                var vin = arg.ApplicationMessage.Topic.Split('/')[1];
-                var payload = System.Text.Encoding.UTF8.GetString(arg.ApplicationMessage.Payload.FirstSpan);
                 var command = JsonSerializer.Deserialize<AcCommand>(payload);
                 if (command is null)
                 {
                     _logger.LogError("Failed to process AC command for {Vin}: payload could not be deserialized", vin);
                     return;
                 }
-                if (String.IsNullOrWhiteSpace(config.Account.SecurityPin))
+                await EnsureAcSettingsLoadedAsync(api, vin, cancellationToken);
+                var settings = GetAcSettings(vin);
+                settings.TargetTemperature = NormalizeTemperature(command.Temperature, settings.TargetTemperature);
+                settings.OperationTime = NormalizeOperationTime(command.OperationTime, settings.OperationTime);
+
+                if ("1".Equals(command.SwitchOrder, StringComparison.Ordinal))
                 {
-                    _logger.LogError("Failed to process AC command for {Vin}: account.securityPin is not configured", vin);
-                    return;
+                    await UpdateVehicleAcDefaultsAsync(api, vin, settings, cancellationToken);
                 }
 
-                // Create the AC command request
-                var request = new SendCmd
-                {
-                    Instructions = new SendCmdInstruction
-                    {
-                        X04 = new Instruction0x04
-                        {
-                            AirConditioner = new AirConditionerInstruction
-                            {
-                                OperationTime = command.OperationTime,
-                                SwitchOrder = command.SwitchOrder,
-                                Temperature = command.Temperature
-                            }
-                        }
-                    },
-                    RemoteType = "0",
-                    SecurityPassword = new CheckSecurityPassword(config.Account.SecurityPin).Md5Hash,
-                    Type = 2,
-                    Vin = vin
-                };
-
-                // Send the command to the car
-                await api.SendCmdAsync(request, cancellationToken);
-
-                // Publish status update to confirm the command was sent
+                await SendAcCommandAsync(api, config, vin, command.SwitchOrder, settings.TargetTemperature, settings.OperationTime, cancellationToken);
                 await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to process AC command on topic {Topic}", arg.ApplicationMessage.Topic);
+            }
+
+            return;
+        }
+
+        if (arg.ApplicationMessage.Topic.EndsWith("/command/ac/mode", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                await EnsureAcSettingsLoadedAsync(api, vin, cancellationToken);
+                var settings = GetAcSettings(vin);
+                var mode = payload.Trim().ToLowerInvariant();
+                var switchOrder = mode switch
+                {
+                    "cool" => "1",
+                    "off" => "0",
+                    _ => null
+                };
+
+                if (switchOrder is null)
+                {
+                    _logger.LogError("Failed to process AC mode command for {Vin}: unsupported mode '{Mode}'", vin, payload);
+                    return;
+                }
+
+                if ("1".Equals(switchOrder, StringComparison.Ordinal))
+                {
+                    await UpdateVehicleAcDefaultsAsync(api, vin, settings, cancellationToken);
+                }
+
+                await SendAcCommandAsync(api, config, vin, switchOrder, settings.TargetTemperature, settings.OperationTime, cancellationToken);
+                await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to process AC mode command on topic {Topic}", arg.ApplicationMessage.Topic);
+            }
+
+            return;
+        }
+
+        if (arg.ApplicationMessage.Topic.EndsWith("/command/ac/temperature", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                await EnsureAcSettingsLoadedAsync(api, vin, cancellationToken);
+                var settings = GetAcSettings(vin);
+                settings.TargetTemperature = NormalizeTemperature(payload, settings.TargetTemperature);
+
+                await UpdateVehicleAcDefaultsAsync(api, vin, settings, cancellationToken);
+
+                if (settings.IsOn)
+                {
+                    await SendAcCommandAsync(api, config, vin, "1", settings.TargetTemperature, settings.OperationTime, cancellationToken);
+                }
+
+                await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to process AC temperature command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
         }
     }
@@ -197,14 +248,21 @@ public class RunCommand:BaseCommand
         var vehicles = await gwm.AcquireVehiclesAsync(cancellationToken);
         foreach (var vehicle in vehicles)
         {
-            var status = await gwm.GetLastVehicleStatusAsync(vehicle.Vin, cancellationToken);
+            var statusTask = gwm.GetLastVehicleStatusAsync(vehicle.Vin, cancellationToken);
+            var basicsTask = gwm.GetVehicleBasicsInfoAsync(vehicle.Vin, cancellationToken);
+            await Task.WhenAll(statusTask, basicsTask);
+
+            var status = await statusTask;
+            var basics = await basicsTask;
             var topicPrefix = $"GWM/{vehicle.Vin}/status";
+            UpdateAcSettings(vehicle.Vin, status, basics);
             if (publishHaDiscovery)
             {
                 await PublishHaDiscoveryAsync(mqtt, options, vehicle, status, cancellationToken);
             }
             await PublishMessageAsync(mqtt, $"{topicPrefix}/AcquisitionTime", status.AcquisitionTime, cancellationToken);
             await PublishMessageAsync(mqtt, $"{topicPrefix}/UpdateTime", status.UpdateTime, cancellationToken);
+            await PublishAcStatusAsync(mqtt, vehicle.Vin, topicPrefix, status, basics, cancellationToken);
             if (status.Latitude.HasValue && status.Longitude.HasValue)
             {
                 await PublishMessageAsync(mqtt, $"{topicPrefix}/Latitude", status.Latitude.Value, cancellationToken);
@@ -424,6 +482,27 @@ public class RunCommand:BaseCommand
                     optimistic = false,
                     retain = false
                 },
+                ac_climate = new
+                {
+                    p = "climate",
+                    unique_id = $"gwm_{vehicle.Vin}_ac_climate",
+                    name = "A/C Climate",
+                    modes = new[] { "off", "cool" },
+                    mode_command_topic = $"GWM/{vehicle.Vin}/command/ac/mode",
+                    mode_state_topic = $"{topicPrefix}/ac/mode",
+                    action_topic = $"{topicPrefix}/ac/action",
+                    temperature_command_topic = $"GWM/{vehicle.Vin}/command/ac/temperature",
+                    temperature_state_topic = $"{topicPrefix}/ac/targetTemperature",
+                    current_temperature_topic = $"{topicPrefix}/items/2201001/value",
+                    current_temperature_template = "{{ value|float / 10 }}",
+                    temperature_unit = "C",
+                    temp_step = 1.0,
+                    min_temp = 16,
+                    max_temp = 32,
+                    icon = "mdi:air-conditioner",
+                    optimistic = false,
+                    retain = false
+                },
                 status_2208001 = new
                 {
                     p = "binary_sensor",
@@ -528,6 +607,126 @@ public class RunCommand:BaseCommand
         return client.PublishAsync(message, cancellationToken);
     }
 
+    private async Task PublishAcStatusAsync(IMqttClient mqtt, string vin, string topicPrefix, VehicleStatus status, VehicleBasicsInfo basics, CancellationToken cancellationToken)
+    {
+        var itemValue = GetStatusItemValue(status, "2202001");
+        var mode = "1".Equals(itemValue, StringComparison.Ordinal) ? "cool" : "off";
+        var action = "1".Equals(itemValue, StringComparison.Ordinal) ? "cooling" : "off";
+        var settings = GetAcSettings(vin);
+        var targetTemperature = NormalizeTemperature(basics.Config?.AirConditionerTemperature, settings.TargetTemperature);
+
+        await PublishMessageAsync(mqtt, $"{topicPrefix}/ac/mode", mode, cancellationToken);
+        await PublishMessageAsync(mqtt, $"{topicPrefix}/ac/action", action, cancellationToken);
+        await PublishMessageAsync(mqtt, $"{topicPrefix}/ac/targetTemperature", targetTemperature, cancellationToken);
+    }
+
+    private void UpdateAcSettings(string vin, VehicleStatus status, VehicleBasicsInfo basics)
+    {
+        var settings = GetAcSettings(vin);
+        settings.TargetTemperature = NormalizeTemperature(basics.Config?.AirConditionerTemperature, settings.TargetTemperature);
+        settings.OperationTime = NormalizeOperationTime(null, settings.OperationTime);
+        settings.IsOn = "1".Equals(GetStatusItemValue(status, "2202001"), StringComparison.Ordinal);
+    }
+
+    private async Task EnsureAcSettingsLoadedAsync(GwmApiClient api, string vin, CancellationToken cancellationToken)
+    {
+        if (_acSettings.TryGetValue(vin, out var existing) &&
+            !String.IsNullOrWhiteSpace(existing.TargetTemperature) &&
+            !String.IsNullOrWhiteSpace(existing.OperationTime))
+        {
+            return;
+        }
+
+        var statusTask = api.GetLastVehicleStatusAsync(vin, cancellationToken);
+        var basicsTask = api.GetVehicleBasicsInfoAsync(vin, cancellationToken);
+        await Task.WhenAll(statusTask, basicsTask);
+        UpdateAcSettings(vin, await statusTask, await basicsTask);
+    }
+
+    private async Task UpdateVehicleAcDefaultsAsync(GwmApiClient api, string vin, AcSettings settings, CancellationToken cancellationToken)
+    {
+        await api.ModifyVehicleRemoteCtlInfoAsync(new ModifyVecicleRemoteCtl
+        {
+            AirConditionerTemperature = settings.TargetTemperature,
+            AirConditionerTime = settings.OperationTime,
+            Vin = vin
+        }, cancellationToken);
+    }
+
+    private async Task SendAcCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, string temperature, string operationTime, CancellationToken cancellationToken)
+    {
+        if (String.IsNullOrWhiteSpace(config.Account.SecurityPin))
+        {
+            _logger.LogError("Failed to process AC command for {Vin}: account.securityPin is not configured", vin);
+            return;
+        }
+
+        var normalizedTemperature = NormalizeTemperature(temperature, DefaultAcTemperature);
+        var normalizedOperationTime = NormalizeOperationTime(operationTime, DefaultAcOperationTime);
+
+        var request = new SendCmd
+        {
+            Instructions = new SendCmdInstruction
+            {
+                X04 = new Instruction0x04
+                {
+                    AirConditioner = new AirConditionerInstruction
+                    {
+                        OperationTime = normalizedOperationTime,
+                        SwitchOrder = switchOrder,
+                        Temperature = normalizedTemperature
+                    }
+                }
+            },
+            RemoteType = "0",
+            SecurityPassword = new CheckSecurityPassword(config.Account.SecurityPin).Md5Hash,
+            Type = 2,
+            Vin = vin
+        };
+
+        await api.SendCmdAsync(request, cancellationToken);
+    }
+
+    private AcSettings GetAcSettings(string vin)
+    {
+        if (!_acSettings.TryGetValue(vin, out var settings))
+        {
+            settings = new AcSettings
+            {
+                TargetTemperature = DefaultAcTemperature,
+                OperationTime = DefaultAcOperationTime
+            };
+            _acSettings[vin] = settings;
+        }
+
+        return settings;
+    }
+
+    private static string NormalizeTemperature(string value, string fallback)
+    {
+        if (Int32.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return parsed.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return fallback ?? DefaultAcTemperature;
+    }
+
+    private static string NormalizeOperationTime(string value, string fallback)
+    {
+        if (Int32.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return parsed.ToString(CultureInfo.InvariantCulture);
+        }
+
+        return fallback ?? DefaultAcOperationTime;
+    }
+
+    private static string GetStatusItemValue(VehicleStatus status, string code)
+    {
+        return status.Items.FirstOrDefault(x => code.Equals(x.Code, StringComparison.Ordinal))?.Value?.ToString();
+    }
+
     private class AcCommand
     {
         [JsonPropertyName("temperature")]
@@ -538,5 +737,14 @@ public class RunCommand:BaseCommand
 
         [JsonPropertyName("switchOrder")]
         public string SwitchOrder { get; set; }
+    }
+
+    private sealed class AcSettings
+    {
+        public bool IsOn { get; set; }
+
+        public string OperationTime { get; set; }
+
+        public string TargetTemperature { get; set; }
     }
 }
