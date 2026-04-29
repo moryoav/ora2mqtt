@@ -20,6 +20,8 @@ public class Ora2MqttAccountOptions
     public string GwId { get; set; }
 
     public string BeanId { get; set; }
+
+    public string SecurityPin { get; set; }
 }
 
 public class Ora2MqttMqttOptions

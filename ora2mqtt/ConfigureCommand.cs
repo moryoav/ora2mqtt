@@ -44,6 +44,7 @@ namespace ora2mqtt
             var client = ConfigureApiClient(config);
 
             await LoginAsync(client, config, cancellationToken);
+            ConfigureRemoteControlAsync(config);
             await SaveConfigAsync(config, cancellationToken);
 
             while (!await TestMqttAsync(config, cancellationToken))
@@ -165,6 +166,21 @@ namespace ora2mqtt
             {
                 options.HomeAssistantDiscoveryTopic = null;
             }
+        }
+
+        private void ConfigureRemoteControlAsync(Ora2MqttOptions options)
+        {
+            var hasSecurityPin = !String.IsNullOrWhiteSpace(options.Account.SecurityPin);
+            var prompt = hasSecurityPin
+                ? "Do you want to update the vehicle remote control PIN used for A/C commands?"
+                : "Do you want to configure the vehicle remote control PIN used for A/C commands?";
+
+            if (!Prompt.Confirm(prompt))
+            {
+                return;
+            }
+
+            options.Account.SecurityPin = Prompt.Password("Please enter your 6 digit remote control PIN");
         }
 
         private async Task<bool> TestMqttAsync(Ora2MqttOptions oraOptions, CancellationToken cancellationToken)

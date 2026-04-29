@@ -20,6 +20,15 @@ There is a command-line application that runs on Windows and can read the curren
 
 In the first step, the configuration file must be created with `ora2mqtt configure`. It's best to create an additional account and share the car with this account. Afterwards, the application can be started with `ora2mqtt run` or simply `ora2mqtt`. This should make the current values visible in MQTT.
 
+Remote commands such as the A/C switch also require the vehicle security PIN from the official app. The `configure` wizard can store it for you, or you can add it to the config file manually:
+
+```yaml
+account:
+  securityPin: "123456"
+```
+
+The PIN is hashed before the API request is sent.
+
 The values (SOC, Range, and Odometer) can be integrated into [evcc](https://github.com/evcc-io/evcc/) with the following configuration:
 
 ```yaml

@@ -9,7 +9,6 @@ using libgwmapi.DTO.Vehicle;
 using Microsoft.Extensions.Logging;
 using ora2mqtt.Logging;
 using System.Text.Json.Serialization;
-using System.Buffers;
 
 namespace ora2mqtt;
 
@@ -38,7 +37,7 @@ public class RunCommand:BaseCommand
         }
 
         var api = GetGwmApiClient(config);
-        using var mqtt = await ConnectMqttAsync(config.Mqtt, api, cancellationToken);
+        using var mqtt = await ConnectMqttAsync(config, api, cancellationToken);
 
         var publishHaDiscovery = config.Mqtt.HomeAssistantDiscoveryTopic is not null;
 
@@ -63,8 +62,9 @@ public class RunCommand:BaseCommand
         return 0;
     }
 
-    private async Task<IMqttClient> ConnectMqttAsync(Ora2MqttMqttOptions options, GwmApiClient api, CancellationToken cancellationToken)
+    private async Task<IMqttClient> ConnectMqttAsync(Ora2MqttOptions config, GwmApiClient api, CancellationToken cancellationToken)
     {
+        var options = config.Mqtt;
         var factory = new MqttClientFactory(new MqttLogger(LoggerFactory));
         var client = factory.CreateMqttClient();
         var builder = new MqttClientOptionsBuilder()
@@ -86,7 +86,7 @@ public class RunCommand:BaseCommand
         await client.ConnectAsync(builder.Build(), cancellationToken);
         if (options.HomeAssistantDiscoveryTopic is not null)
         {
-            client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, options, cancellationToken);
+            client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, config, cancellationToken);
             await client.SubscribeAsync($"{options.HomeAssistantDiscoveryTopic}/status", cancellationToken: cancellationToken);
         }
         // Subscribe to AC command topic
@@ -94,8 +94,9 @@ public class RunCommand:BaseCommand
         return client;
     }
 
-    private async Task OnMessageAsync(MqttApplicationMessageReceivedEventArgs arg, IMqttClient mqtt, GwmApiClient api, Ora2MqttMqttOptions options, CancellationToken cancellationToken)
+    private async Task OnMessageAsync(MqttApplicationMessageReceivedEventArgs arg, IMqttClient mqtt, GwmApiClient api, Ora2MqttOptions config, CancellationToken cancellationToken)
     {
+        var options = config.Mqtt;
         if (arg.ApplicationMessage.Topic == $"{options.HomeAssistantDiscoveryTopic}/status")
         {
             await PublishStatusAsync(mqtt, api, options, true, cancellationToken);
@@ -110,6 +111,16 @@ public class RunCommand:BaseCommand
                 var vin = arg.ApplicationMessage.Topic.Split('/')[1];
                 var payload = System.Text.Encoding.UTF8.GetString(arg.ApplicationMessage.Payload.FirstSpan);
                 var command = JsonSerializer.Deserialize<AcCommand>(payload);
+                if (command is null)
+                {
+                    _logger.LogError("Failed to process AC command for {Vin}: payload could not be deserialized", vin);
+                    return;
+                }
+                if (String.IsNullOrWhiteSpace(config.Account.SecurityPin))
+                {
+                    _logger.LogError("Failed to process AC command for {Vin}: account.securityPin is not configured", vin);
+                    return;
+                }
 
                 // Create the AC command request
                 var request = new SendCmd
@@ -127,6 +138,7 @@ public class RunCommand:BaseCommand
                         }
                     },
                     RemoteType = "0",
+                    SecurityPassword = new CheckSecurityPassword(config.Account.SecurityPin).Md5Hash,
                     Type = 2,
                     Vin = vin
                 };
@@ -139,7 +151,7 @@ public class RunCommand:BaseCommand
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Failed to process AC command: {ex.Message}");
+                _logger.LogError(ex, "Failed to process AC command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
         }
     }
@@ -400,6 +412,8 @@ public class RunCommand:BaseCommand
                     p = "switch",
                     unique_id = $"gwm_{vehicle.Vin}_ac_switch",
                     state_topic = $"{topicPrefix}/items/2202001/value",
+                    state_off = "0",
+                    state_on = "1",
                     command_topic = $"GWM/{vehicle.Vin}/command/ac",
                     name = "A/C Control",
                     payload_off = "{\"switchOrder\":\"0\",\"temperature\":\"22\",\"operationTime\":\"30\"}",
