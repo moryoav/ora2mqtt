@@ -385,6 +385,16 @@ public class RunCommand:BaseCommand
                     state_class= "measurement",
                     name="SOC"
                 },
+                status_2013022 = new
+                {
+                    p = "sensor",
+                    device_class = "duration",
+                    unique_id = $"gwm_{vehicle.Vin}_2013022",
+                    unit_of_measurement = "min",
+                    state_topic = $"{topicPrefix}/items/2013022/value",
+                    state_class = "measurement",
+                    name = "Remaining Charging Time"
+                },
                 status_2011501 = new
                 {
                     p="sensor",
