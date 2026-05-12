@@ -33,12 +33,15 @@ public class SendCmd
 public class SendCmdInstruction
 {
     [JsonPropertyName("0x04")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Instruction0x04 X04 { get; set; }
 
     [JsonPropertyName("0x05")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Instruction0x05 X05 { get; set; }
 
     [JsonPropertyName("0x08")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Instruction0x08 X08 { get; set; }
 }
 

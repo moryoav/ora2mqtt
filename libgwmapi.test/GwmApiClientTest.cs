@@ -175,6 +175,35 @@ public class GwmApiClientTest
     }
 
     [Fact]
+    public void SendCmdSerializesOnlyActiveInstruction()
+    {
+        var request = new SendCmd
+        {
+            Instructions = new SendCmdInstruction
+            {
+                X05 = new Instruction0x05
+                {
+                    OperationTime = "0",
+                    SwitchOrder = "1"
+                }
+            },
+            RemoteType = "0",
+            SecurityPassword = "hash",
+            Type = 2,
+            Vin = "vin"
+        };
+
+        var json = JsonSerializer.Serialize(request);
+        using var document = JsonDocument.Parse(json);
+        var instructions = document.RootElement.GetProperty("instructions");
+
+        Assert.True(instructions.TryGetProperty("0x05", out var x05));
+        Assert.False(instructions.TryGetProperty("0x04", out _));
+        Assert.False(instructions.TryGetProperty("0x08", out _));
+        Assert.Equal("1", x05.GetProperty("switchOrder").GetString());
+    }
+
+    [Fact]
     public async Task CanGetRemoteCtrlResult()
     {
         var client = GetAuthenticatedClient();
