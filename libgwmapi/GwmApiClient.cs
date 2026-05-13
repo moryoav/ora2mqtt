@@ -110,27 +110,44 @@ public partial class GwmApiClient
 
     private async Task CheckResponseAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
-        if (_logger.IsEnabled(LogLevel.Trace))
-        {
-            await response.Content.LoadIntoBufferAsync();
-            _logger.LogTrace(await response.Content.ReadAsStringAsync(cancellationToken));
-        }
-        response.EnsureSuccessStatusCode();
-        var result = await response.Content.ReadFromJsonAsync<GwmResponse>(cancellationToken: cancellationToken);
-        CheckResponse(result);
+        await ReadGwmResponseAsync<GwmResponse>(response, cancellationToken);
     }
 
     private async Task<T> GetResponseAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
     {
+        var result = await ReadGwmResponseAsync<GwmResponse<T>>(response, cancellationToken);
+        return result.Data;
+    }
+
+    private async Task<T> ReadGwmResponseAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
+        where T : GwmResponse
+    {
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
         if (_logger.IsEnabled(LogLevel.Trace))
         {
-            await response.Content.LoadIntoBufferAsync();
-            _logger.LogTrace(await response.Content.ReadAsStringAsync(cancellationToken));
+            _logger.LogTrace(content);
         }
-        response.EnsureSuccessStatusCode();
-        var result = await response.Content.ReadFromJsonAsync<GwmResponse<T>>(cancellationToken: cancellationToken);
+
+        T result;
+        try
+        {
+            result = JsonSerializer.Deserialize<T>(content);
+        }
+        catch (JsonException) when (!response.IsSuccessStatusCode)
+        {
+            response.EnsureSuccessStatusCode();
+            throw;
+        }
+
+        if (result is null)
+        {
+            response.EnsureSuccessStatusCode();
+            throw new JsonException("GWM response body was empty.");
+        }
+
         CheckResponse(result);
-        return result.Data;
+        response.EnsureSuccessStatusCode();
+        return result;
     }
 
     private void CheckResponse(GwmResponse response)

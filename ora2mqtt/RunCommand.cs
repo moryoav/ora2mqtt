@@ -20,9 +20,14 @@ public class RunCommand:BaseCommand
     private const string LockCommandPayload = "LOCK";
     private const string UnlockCommandPayload = "UNLOCK";
     private const string WindowClosePayload = "PRESS";
+    private const string RemoteCommandPendingResultCode = "2000";
+    private const int RemoteCommandResultMaxPolls = 18;
+    private const int RemoteCommandStatusMaxLength = 240;
+    private static readonly TimeSpan RemoteCommandResultPollInterval = TimeSpan.FromSeconds(5);
 
     private ILogger _logger;
     private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _lastRemoteCommandStatuses = new(StringComparer.OrdinalIgnoreCase);
 
     [Option('i', "interval", Default = 10, HelpText = "GWM API polling interval")]
     public int Intervall { get; set; }
@@ -124,14 +129,18 @@ public class RunCommand:BaseCommand
 
         if (arg.ApplicationMessage.Topic.EndsWith("/command/ac", StringComparison.OrdinalIgnoreCase))
         {
+            const string commandName = "A/C";
             try
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: received MQTT command", cancellationToken);
                 var command = JsonSerializer.Deserialize<AcCommand>(payload);
                 if (command is null)
                 {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - payload could not be deserialized", cancellationToken);
                     _logger.LogError("Failed to process AC command for {Vin}: payload could not be deserialized", vin);
                     return;
                 }
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: loading current settings", cancellationToken);
                 await EnsureAcSettingsLoadedAsync(api, vin, cancellationToken);
                 var settings = GetAcSettings(vin);
                 settings.TargetTemperature = NormalizeTemperature(command.Temperature, settings.TargetTemperature);
@@ -139,14 +148,22 @@ public class RunCommand:BaseCommand
 
                 if ("1".Equals(command.SwitchOrder, StringComparison.Ordinal))
                 {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: updating vehicle defaults", cancellationToken);
                     await UpdateVehicleAcDefaultsAsync(api, vin, settings, cancellationToken);
                 }
 
-                await SendAcCommandAsync(api, config, vin, command.SwitchOrder, settings.TargetTemperature, settings.OperationTime, cancellationToken);
+                await ExecuteRemoteCommandAsync(
+                    mqtt,
+                    api,
+                    vin,
+                    commandName,
+                    () => SendAcCommandAsync(api, config, vin, command.SwitchOrder, settings.TargetTemperature, settings.OperationTime, cancellationToken),
+                    cancellationToken);
                 await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
             }
             catch (Exception ex)
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - {FormatRemoteCommandException(ex)}", cancellationToken);
                 _logger.LogError(ex, "Failed to process AC command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
 
@@ -155,8 +172,11 @@ public class RunCommand:BaseCommand
 
         if (arg.ApplicationMessage.Topic.EndsWith("/command/ac/mode", StringComparison.OrdinalIgnoreCase))
         {
+            const string commandName = "A/C mode";
             try
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: received MQTT command", cancellationToken);
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: loading current settings", cancellationToken);
                 await EnsureAcSettingsLoadedAsync(api, vin, cancellationToken);
                 var settings = GetAcSettings(vin);
                 var mode = payload.Trim().ToLowerInvariant();
@@ -169,20 +189,29 @@ public class RunCommand:BaseCommand
 
                 if (switchOrder is null)
                 {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - unsupported mode '{payload}'", cancellationToken);
                     _logger.LogError("Failed to process AC mode command for {Vin}: unsupported mode '{Mode}'", vin, payload);
                     return;
                 }
 
                 if ("1".Equals(switchOrder, StringComparison.Ordinal))
                 {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: updating vehicle defaults", cancellationToken);
                     await UpdateVehicleAcDefaultsAsync(api, vin, settings, cancellationToken);
                 }
 
-                await SendAcCommandAsync(api, config, vin, switchOrder, settings.TargetTemperature, settings.OperationTime, cancellationToken);
+                await ExecuteRemoteCommandAsync(
+                    mqtt,
+                    api,
+                    vin,
+                    commandName,
+                    () => SendAcCommandAsync(api, config, vin, switchOrder, settings.TargetTemperature, settings.OperationTime, cancellationToken),
+                    cancellationToken);
                 await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
             }
             catch (Exception ex)
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - {FormatRemoteCommandException(ex)}", cancellationToken);
                 _logger.LogError(ex, "Failed to process AC mode command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
 
@@ -191,23 +220,38 @@ public class RunCommand:BaseCommand
 
         if (arg.ApplicationMessage.Topic.EndsWith("/command/ac/temperature", StringComparison.OrdinalIgnoreCase))
         {
+            const string commandName = "A/C temperature";
             try
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: received MQTT command", cancellationToken);
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: loading current settings", cancellationToken);
                 await EnsureAcSettingsLoadedAsync(api, vin, cancellationToken);
                 var settings = GetAcSettings(vin);
                 settings.TargetTemperature = NormalizeTemperature(payload, settings.TargetTemperature);
 
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: updating vehicle defaults", cancellationToken);
                 await UpdateVehicleAcDefaultsAsync(api, vin, settings, cancellationToken);
 
                 if (settings.IsOn)
                 {
-                    await SendAcCommandAsync(api, config, vin, "1", settings.TargetTemperature, settings.OperationTime, cancellationToken);
+                    await ExecuteRemoteCommandAsync(
+                        mqtt,
+                        api,
+                        vin,
+                        commandName,
+                        () => SendAcCommandAsync(api, config, vin, "1", settings.TargetTemperature, settings.OperationTime, cancellationToken),
+                        cancellationToken);
+                }
+                else
+                {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: saved; A/C is off so no remote command was sent", cancellationToken);
                 }
 
                 await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
             }
             catch (Exception ex)
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - {FormatRemoteCommandException(ex)}", cancellationToken);
                 _logger.LogError(ex, "Failed to process AC temperature command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
 
@@ -216,8 +260,10 @@ public class RunCommand:BaseCommand
 
         if (arg.ApplicationMessage.Topic.EndsWith("/command/lock", StringComparison.OrdinalIgnoreCase))
         {
+            const string commandName = "Door lock";
             try
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: received MQTT command", cancellationToken);
                 var switchOrder = payload.Trim().ToUpperInvariant() switch
                 {
                     LockCommandPayload => "2",
@@ -227,15 +273,23 @@ public class RunCommand:BaseCommand
 
                 if (switchOrder is null)
                 {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - unsupported payload '{payload}'", cancellationToken);
                     _logger.LogError("Failed to process lock command for {Vin}: unsupported payload '{Payload}'", vin, payload);
                     return;
                 }
 
-                await SendLockCommandAsync(api, config, vin, switchOrder, cancellationToken);
+                await ExecuteRemoteCommandAsync(
+                    mqtt,
+                    api,
+                    vin,
+                    commandName,
+                    () => SendLockCommandAsync(api, config, vin, switchOrder, cancellationToken),
+                    cancellationToken);
                 await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
             }
             catch (Exception ex)
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - {FormatRemoteCommandException(ex)}", cancellationToken);
                 _logger.LogError(ex, "Failed to process lock command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
 
@@ -244,20 +298,30 @@ public class RunCommand:BaseCommand
 
         if (arg.ApplicationMessage.Topic.EndsWith("/command/windows/close", StringComparison.OrdinalIgnoreCase))
         {
+            const string commandName = "Window close";
             try
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: received MQTT command", cancellationToken);
                 if (!String.IsNullOrWhiteSpace(payload) &&
                     !WindowClosePayload.Equals(payload.Trim(), StringComparison.OrdinalIgnoreCase))
                 {
+                    await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - unsupported payload '{payload}'", cancellationToken);
                     _logger.LogError("Failed to process window close command for {Vin}: unsupported payload '{Payload}'", vin, payload);
                     return;
                 }
 
-                await SendWindowCloseCommandAsync(api, config, vin, cancellationToken);
+                await ExecuteRemoteCommandAsync(
+                    mqtt,
+                    api,
+                    vin,
+                    commandName,
+                    () => SendWindowCloseCommandAsync(api, config, vin, cancellationToken),
+                    cancellationToken);
                 await PublishStatusAsync(mqtt, api, options, false, cancellationToken);
             }
             catch (Exception ex)
             {
+                await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - {FormatRemoteCommandException(ex)}", cancellationToken);
                 _logger.LogError(ex, "Failed to process window close command on topic {Topic}", arg.ApplicationMessage.Topic);
             }
         }
@@ -316,6 +380,7 @@ public class RunCommand:BaseCommand
             }
             await PublishMessageAsync(mqtt, $"{topicPrefix}/AcquisitionTime", status.AcquisitionTime, cancellationToken);
             await PublishMessageAsync(mqtt, $"{topicPrefix}/UpdateTime", status.UpdateTime, cancellationToken);
+            await PublishLastRemoteCommandStatusAsync(mqtt, vehicle.Vin, cancellationToken);
             await PublishAcStatusAsync(mqtt, vehicle.Vin, topicPrefix, status, basics, cancellationToken);
             if (status.Latitude.HasValue && status.Longitude.HasValue)
             {
@@ -592,6 +657,16 @@ public class RunCommand:BaseCommand
                     icon = "mdi:window-closed-variant",
                     retain = false
                 },
+                remote_command_status = new
+                {
+                    p = "sensor",
+                    unique_id = $"gwm_{vehicle.Vin}_remote_command_status",
+                    state_topic = $"{topicPrefix}/commandStatus",
+                    name = "Remote Command Status",
+                    icon = "mdi:progress-clock",
+                    entity_category = "diagnostic",
+                    force_update = true
+                },
                 status_2208001 = new
                 {
                     p = "binary_sensor",
@@ -677,6 +752,39 @@ public class RunCommand:BaseCommand
         return PublishMessageAsync(mqtt, $"{options.HomeAssistantDiscoveryTopic}/device/{vehicle.Vin}/config", json, cancellationToken);
     }
 
+    private Task PublishLastRemoteCommandStatusAsync(IMqttClient mqtt, string vin, CancellationToken cancellationToken)
+    {
+        if (!_lastRemoteCommandStatuses.TryGetValue(vin, out var status))
+        {
+            status = "No remote command has run yet";
+        }
+
+        return PublishMessageAsync(mqtt, GetRemoteCommandStatusTopic(vin), status, cancellationToken);
+    }
+
+    private Task PublishRemoteCommandStatusAsync(IMqttClient mqtt, string vin, string status, CancellationToken cancellationToken)
+    {
+        var normalizedStatus = NormalizeRemoteCommandStatus(status);
+        _lastRemoteCommandStatuses[vin] = normalizedStatus;
+        return PublishMessageAsync(mqtt, GetRemoteCommandStatusTopic(vin), normalizedStatus, cancellationToken);
+    }
+
+    private static string GetRemoteCommandStatusTopic(string vin)
+    {
+        return $"GWM/{vin}/status/commandStatus";
+    }
+
+    private static string NormalizeRemoteCommandStatus(string status)
+    {
+        status = String.Join(" ", (status ?? String.Empty).Split(Array.Empty<char>(), StringSplitOptions.RemoveEmptyEntries));
+        if (status.Length <= RemoteCommandStatusMaxLength)
+        {
+            return status;
+        }
+
+        return status[..(RemoteCommandStatusMaxLength - 3)] + "...";
+    }
+
     private Task PublishMessageAsync(IMqttClient client, string topic, double payload, CancellationToken cancellationToken)
     {
         return PublishMessageAsync(client, topic, payload.ToString(CultureInfo.InvariantCulture), cancellationToken);
@@ -742,12 +850,106 @@ public class RunCommand:BaseCommand
         }, cancellationToken);
     }
 
-    private async Task SendLockCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, CancellationToken cancellationToken)
+    private async Task ExecuteRemoteCommandAsync(
+        IMqttClient mqtt,
+        GwmApiClient api,
+        string vin,
+        string commandName,
+        Func<Task<string>> sendCommandAsync,
+        CancellationToken cancellationToken)
+    {
+        await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: sending command to GWM", cancellationToken);
+        var seqNo = await sendCommandAsync();
+        if (seqNo is null)
+        {
+            await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: failed - account.securityPin is not configured", cancellationToken);
+            return;
+        }
+
+        await PublishRemoteCommandStatusAsync(mqtt, vin, $"{commandName}: accepted by GWM, waiting for vehicle result", cancellationToken);
+        await WaitForRemoteCommandResultAsync(mqtt, api, vin, commandName, seqNo, cancellationToken);
+    }
+
+    private async Task WaitForRemoteCommandResultAsync(
+        IMqttClient mqtt,
+        GwmApiClient api,
+        string vin,
+        string commandName,
+        string seqNo,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= RemoteCommandResultMaxPolls; attempt++)
+        {
+            await Task.Delay(RemoteCommandResultPollInterval, cancellationToken);
+            var results = await api.GetRemoteCtrlResultAsync(seqNo, cancellationToken);
+            var result = results.FirstOrDefault(x => String.Equals(x.HwCommandId, seqNo, StringComparison.OrdinalIgnoreCase))
+                         ?? results.FirstOrDefault();
+
+            if (result is null)
+            {
+                await PublishRemoteCommandStatusAsync(
+                    mqtt,
+                    vin,
+                    $"{commandName}: waiting for vehicle result ({attempt}/{RemoteCommandResultMaxPolls})",
+                    cancellationToken);
+                continue;
+            }
+
+            await PublishRemoteCommandStatusAsync(
+                mqtt,
+                vin,
+                FormatRemoteCommandResult(commandName, result, attempt),
+                cancellationToken);
+
+            if (!RemoteCommandPendingResultCode.Equals(result.ResultCode, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+
+        await PublishRemoteCommandStatusAsync(
+            mqtt,
+            vin,
+            $"{commandName}: timed out waiting for vehicle result after {RemoteCommandResultMaxPolls * RemoteCommandResultPollInterval.TotalSeconds:0} seconds",
+            cancellationToken);
+    }
+
+    private static string FormatRemoteCommandResult(string commandName, RemoteCtrlResultT5 result, int attempt)
+    {
+        var resultCode = String.IsNullOrWhiteSpace(result.ResultCode) ? "unknown" : result.ResultCode;
+        var resultMsg = String.IsNullOrWhiteSpace(result.ResultMsg) ? "no message" : result.ResultMsg;
+        if (RemoteCommandPendingResultCode.Equals(result.ResultCode, StringComparison.Ordinal))
+        {
+            return $"{commandName}: in progress ({attempt}/{RemoteCommandResultMaxPolls}) - {resultMsg} [{resultCode}]";
+        }
+
+        var status = IsSuccessfulRemoteCommandResult(result) ? "completed" : "failed";
+        return $"{commandName}: {status} - {resultMsg} [{resultCode}]";
+    }
+
+    private static bool IsSuccessfulRemoteCommandResult(RemoteCtrlResultT5 result)
+    {
+        return "0".Equals(result.ResultCode, StringComparison.Ordinal)
+               || "6".Equals(result.ResultCode, StringComparison.Ordinal)
+               || "Success".Equals(result.ResultMsg, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FormatRemoteCommandException(Exception exception)
+    {
+        if (exception is GwmApiException gwmException)
+        {
+            return $"{gwmException.Message} [{gwmException.Code}]";
+        }
+
+        return exception.Message;
+    }
+
+    private async Task<string> SendLockCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, CancellationToken cancellationToken)
     {
         var securityPassword = GetSecurityPassword(config, vin, "lock");
         if (securityPassword is null)
         {
-            return;
+            return null;
         }
 
         var request = new SendCmd
@@ -767,14 +969,15 @@ public class RunCommand:BaseCommand
         };
 
         await api.SendCmdAsync(request, cancellationToken);
+        return request.SeqNo;
     }
 
-    private async Task SendWindowCloseCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, CancellationToken cancellationToken)
+    private async Task<string> SendWindowCloseCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, CancellationToken cancellationToken)
     {
         var securityPassword = GetSecurityPassword(config, vin, "window close");
         if (securityPassword is null)
         {
-            return;
+            return null;
         }
 
         var request = new SendCmd
@@ -801,14 +1004,15 @@ public class RunCommand:BaseCommand
         };
 
         await api.SendCmdAsync(request, cancellationToken);
+        return request.SeqNo;
     }
 
-    private async Task SendAcCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, string temperature, string operationTime, CancellationToken cancellationToken)
+    private async Task<string> SendAcCommandAsync(GwmApiClient api, Ora2MqttOptions config, string vin, string switchOrder, string temperature, string operationTime, CancellationToken cancellationToken)
     {
         var securityPassword = GetSecurityPassword(config, vin, "AC");
         if (securityPassword is null)
         {
-            return;
+            return null;
         }
 
         var normalizedTemperature = NormalizeTemperature(temperature, DefaultAcTemperature);
@@ -835,6 +1039,7 @@ public class RunCommand:BaseCommand
         };
 
         await api.SendCmdAsync(request, cancellationToken);
+        return request.SeqNo;
     }
 
     private string GetSecurityPassword(Ora2MqttOptions config, string vin, string commandName)
