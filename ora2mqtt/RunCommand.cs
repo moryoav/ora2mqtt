@@ -1,4 +1,5 @@
 ﻿using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using CommandLine;
 using libgwmapi;
@@ -24,10 +25,14 @@ public class RunCommand:BaseCommand
     private const int RemoteCommandResultMaxPolls = 18;
     private const int RemoteCommandStatusMaxLength = 240;
     private static readonly TimeSpan RemoteCommandResultPollInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DiscoveryRepublishInterval = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
 
     private ILogger _logger;
     private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _lastRemoteCommandStatuses = new(StringComparer.OrdinalIgnoreCase);
+    private volatile bool _discoveryPublishRequested = true;
+    private DateTime _lastDiscoveryPublishUtc = DateTime.MinValue;
 
     [Option('i', "interval", Default = 10, HelpText = "GWM API polling interval")]
     public int Intervall { get; set; }
@@ -53,7 +58,9 @@ public class RunCommand:BaseCommand
         var api = GetGwmApiClient(config);
         using var mqtt = await ConnectMqttAsync(config, api, cancellationToken);
 
-        var publishHaDiscovery = config.Mqtt.HomeAssistantDiscoveryTopic is not null;
+        var discoveryEnabled = config.Mqtt.HomeAssistantDiscoveryTopic is not null;
+        _logger.LogInformation("Starting run loop. Interval={Interval}s, HA-Discovery={Enabled}, DiscoveryRepublishInterval={Republish}",
+            Intervall, discoveryEnabled, DiscoveryRepublishInterval);
 
         try
         {
@@ -61,10 +68,18 @@ public class RunCommand:BaseCommand
             while (!cancellationToken.IsCancellationRequested)
             {
                 await RefreshTokenAsync(api, config, cancellationToken);
-                await PublishStatusAsync(mqtt, api, config.Mqtt, publishHaDiscovery, cancellationToken);
-                if (publishHaDiscovery)
+                var shouldPublishDiscovery = discoveryEnabled && ShouldPublishDiscoveryNow();
+                if (shouldPublishDiscovery)
                 {
-                    publishHaDiscovery = false;
+                    _logger.LogInformation("Publishing HA discovery (requested={Requested}, ageSinceLastPublish={Age})",
+                        _discoveryPublishRequested,
+                        _lastDiscoveryPublishUtc == DateTime.MinValue ? "never" : (DateTime.UtcNow - _lastDiscoveryPublishUtc).ToString());
+                }
+                await PublishStatusAsync(mqtt, api, config.Mqtt, shouldPublishDiscovery, cancellationToken);
+                if (shouldPublishDiscovery)
+                {
+                    _lastDiscoveryPublishUtc = DateTime.UtcNow;
+                    _discoveryPublishRequested = false;
                 }
                 await timer.WaitForNextTickAsync(cancellationToken);
             }
@@ -73,7 +88,15 @@ public class RunCommand:BaseCommand
         {
             //ignore
         }
+        _logger.LogInformation("Run loop stopped");
         return 0;
+    }
+
+    private bool ShouldPublishDiscoveryNow()
+    {
+        if (_discoveryPublishRequested) return true;
+        if (_lastDiscoveryPublishUtc == DateTime.MinValue) return true;
+        return (DateTime.UtcNow - _lastDiscoveryPublishUtc) >= DiscoveryRepublishInterval;
     }
 
     private async Task<IMqttClient> ConnectMqttAsync(Ora2MqttOptions config, GwmApiClient api, CancellationToken cancellationToken)
@@ -83,28 +106,63 @@ public class RunCommand:BaseCommand
         var client = factory.CreateMqttClient();
         var builder = new MqttClientOptionsBuilder()
             .WithTcpServer(options.Host)
-            .WithTlsOptions(new MqttClientTlsOptions { UseTls = options.UseTls });
+            .WithTlsOptions(new MqttClientTlsOptions { UseTls = options.UseTls })
+            .WithCleanSession(true);
         if (!String.IsNullOrEmpty(options.Username) && !String.IsNullOrEmpty(options.Password))
         {
             builder = builder.WithCredentials(options.Username, options.Password);
         }
 
+        // Re-subscribe on every (re)connect — MQTT CleanSession=true loses subscriptions on disconnect.
+        client.ConnectedAsync += async e =>
+        {
+            _logger.LogInformation("MQTT connected to {Host} (resultCode={Result})", options.Host, e.ConnectResult.ResultCode);
+            try
+            {
+                if (options.HomeAssistantDiscoveryTopic is not null)
+                {
+                    var statusTopic = $"{options.HomeAssistantDiscoveryTopic}/status";
+                    await client.SubscribeAsync(statusTopic, cancellationToken: cancellationToken);
+                    _logger.LogInformation("Subscribed to {Topic} (HA birth/LWT)", statusTopic);
+                }
+                await client.SubscribeAsync("GWM/+/command/#", cancellationToken: cancellationToken);
+                _logger.LogInformation("Subscribed to GWM/+/command/#");
+
+                // Trigger discovery republish on (re)connect — broker may have dropped retained state.
+                _discoveryPublishRequested = true;
+                _logger.LogInformation("Discovery republish requested due to (re)connect");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to re-subscribe after connect");
+            }
+        };
+
         client.DisconnectedAsync += async e =>
         {
-            if (e.ClientWasConnected)
+            _logger.LogWarning("MQTT disconnected. Reason={Reason}, WasConnected={WasConnected}, Exception={Exception}",
+                e.Reason, e.ClientWasConnected, e.Exception?.Message ?? "none");
+            if (!e.ClientWasConnected || cancellationToken.IsCancellationRequested)
             {
+                return;
+            }
+            try
+            {
+                await Task.Delay(ReconnectDelay, cancellationToken);
+                _logger.LogInformation("Attempting MQTT reconnect to {Host}", options.Host);
                 await client.ConnectAsync(client.Options, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "MQTT reconnect failed — will retry on next disconnect event");
             }
         };
 
         client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, config, cancellationToken);
+
+        _logger.LogInformation("Connecting to MQTT {Host} (TLS={Tls}, User={User})",
+            options.Host, options.UseTls, string.IsNullOrEmpty(options.Username) ? "<none>" : options.Username);
         await client.ConnectAsync(builder.Build(), cancellationToken);
-        if (options.HomeAssistantDiscoveryTopic is not null)
-        {
-            await client.SubscribeAsync($"{options.HomeAssistantDiscoveryTopic}/status", cancellationToken: cancellationToken);
-        }
-        // Subscribe to remote command topics.
-        await client.SubscribeAsync("GWM/+/command/#", cancellationToken: cancellationToken);
         return client;
     }
 
@@ -114,7 +172,16 @@ public class RunCommand:BaseCommand
         if (options.HomeAssistantDiscoveryTopic is not null &&
             arg.ApplicationMessage.Topic == $"{options.HomeAssistantDiscoveryTopic}/status")
         {
-            await PublishStatusAsync(mqtt, api, options, true, cancellationToken);
+            var birthPayload = Encoding.UTF8.GetString(arg.ApplicationMessage.Payload.FirstSpan).Trim();
+            if (string.Equals(birthPayload, "online", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("HA birth message received (payload=online) — requesting discovery republish on next tick");
+                _discoveryPublishRequested = true;
+            }
+            else
+            {
+                _logger.LogInformation("HA status message received (payload={Payload}) — ignored", birthPayload);
+            }
             return;
         }
 
@@ -749,7 +816,10 @@ public class RunCommand:BaseCommand
                 },
             }
         });
-        return PublishMessageAsync(mqtt, $"{options.HomeAssistantDiscoveryTopic}/device/{vehicle.Vin}/config", json, cancellationToken);
+        var topic = $"{options.HomeAssistantDiscoveryTopic}/device/{vehicle.Vin}/config";
+        _logger.LogInformation("Publishing HA discovery (retain=true) for VIN {Vin} to {Topic} ({Bytes} bytes)",
+            vehicle.Vin, topic, json.Length);
+        return PublishMessageAsync(mqtt, topic, json, cancellationToken, retain: true);
     }
 
     private Task PublishLastRemoteCommandStatusAsync(IMqttClient mqtt, string vin, CancellationToken cancellationToken)
@@ -795,11 +865,12 @@ public class RunCommand:BaseCommand
         return PublishMessageAsync(client, topic, payload.ToString(CultureInfo.InvariantCulture), cancellationToken);
     }
 
-    private Task PublishMessageAsync(IMqttClient client, string topic, string payload, CancellationToken cancellationToken)
+    private Task PublishMessageAsync(IMqttClient client, string topic, string payload, CancellationToken cancellationToken, bool retain = false)
     {
         var message = new MqttApplicationMessageBuilder()
             .WithTopic(topic)
             .WithPayload(payload)
+            .WithRetainFlag(retain)
             .Build();
         return client.PublishAsync(message, cancellationToken);
     }

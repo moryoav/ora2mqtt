@@ -21,7 +21,14 @@ public abstract class BaseCommand
 
     protected void Setup()
     {
-        LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(x => x.SetMinimumLevel(Debug ? LogLevel.Trace : LogLevel.Error).AddConsole());
+        LoggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(x =>
+            x.SetMinimumLevel(Debug ? LogLevel.Trace : LogLevel.Information)
+                .AddSimpleConsole(o =>
+                {
+                    o.IncludeScopes = false;
+                    o.SingleLine = true;
+                    o.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
+                }));
     }
 
     protected GwmApiClient ConfigureApiClient(Ora2MqttOptions options)
