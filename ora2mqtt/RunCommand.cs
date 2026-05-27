@@ -62,10 +62,11 @@ public class RunCommand:BaseCommand
         _logger.LogInformation("Starting run loop. Interval={Interval}s, HA-Discovery={Enabled}, DiscoveryRepublishInterval={Republish}",
             Intervall, discoveryEnabled, DiscoveryRepublishInterval);
 
-        try
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Intervall));
+        var consecutiveFailures = 0;
+        while (!cancellationToken.IsCancellationRequested)
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Intervall));
-            while (!cancellationToken.IsCancellationRequested)
+            try
             {
                 await RefreshTokenAsync(api, config, cancellationToken);
                 var shouldPublishDiscovery = discoveryEnabled && ShouldPublishDiscoveryNow();
@@ -81,12 +82,32 @@ public class RunCommand:BaseCommand
                     _lastDiscoveryPublishUtc = DateTime.UtcNow;
                     _discoveryPublishRequested = false;
                 }
+                if (consecutiveFailures > 0)
+                {
+                    _logger.LogInformation("Recovered after {Count} consecutive failures", consecutiveFailures);
+                    consecutiveFailures = 0;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                consecutiveFailures++;
+                _logger.LogWarning(ex,
+                    "Cycle failed (#{Count} consecutive). Sleeping {Interval}s and retrying. " +
+                    "Common causes: transient GWM-cloud 5xx, network blip, MQTT publish error",
+                    consecutiveFailures, Intervall);
+            }
+            try
+            {
                 await timer.WaitForNextTickAsync(cancellationToken);
             }
-        }
-        catch (TaskCanceledException)
-        {
-            //ignore
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
         _logger.LogInformation("Run loop stopped");
         return 0;
