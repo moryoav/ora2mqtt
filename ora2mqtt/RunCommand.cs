@@ -167,15 +167,29 @@ public class RunCommand:BaseCommand
             {
                 return;
             }
-            try
+            // Persistent retry — DisconnectedAsync fires only ONCE per drop; if the
+            // single ConnectAsync below fails, no new disconnect event will trigger
+            // another attempt. So loop here until we reconnect or get cancelled.
+            var attempt = 0;
+            while (!cancellationToken.IsCancellationRequested && !client.IsConnected)
             {
-                await Task.Delay(ReconnectDelay, cancellationToken);
-                _logger.LogInformation("Attempting MQTT reconnect to {Host}", options.Host);
-                await client.ConnectAsync(client.Options, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "MQTT reconnect failed — will retry on next disconnect event");
+                attempt++;
+                try
+                {
+                    await Task.Delay(ReconnectDelay, cancellationToken);
+                    _logger.LogInformation("MQTT reconnect attempt {Attempt} to {Host}", attempt, options.Host);
+                    await client.ConnectAsync(client.Options, cancellationToken);
+                    break;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("MQTT reconnect attempt {Attempt} failed: {Message} — retrying in {Delay}s",
+                        attempt, ex.Message, ReconnectDelay.TotalSeconds);
+                }
             }
         };
 
