@@ -33,7 +33,8 @@ public partial class GwmApiClient
         _h5Client.DefaultRequestHeaders.Add("appId", Header("appId", "3"));
         _h5Client.DefaultRequestHeaders.Add("enterpriseId", Header("enterpriseId", "CC01"));
         _h5Client.DefaultRequestHeaders.Add("channel", Header("channel", "APP"));
-        _h5Client.BaseAddress = new Uri("https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
+        _h5Client.BaseAddress = new Uri(Environment.GetEnvironmentVariable("GWM_H5_BASE")
+            ?? "https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
 
         _appClient = appClient;
         _appClient.DefaultRequestHeaders.Add("rs", Header("rs", "2"));
@@ -120,6 +121,22 @@ public partial class GwmApiClient
 
         _appClient.DefaultRequestHeaders.Remove("accessToken");
         _appClient.DefaultRequestHeaders.Add("accessToken", accessToken);
+    }
+
+    /// <summary>
+    /// Sends a raw request and returns the unparsed response, for exploring
+    /// endpoints whose request and response shapes are not known yet.
+    /// </summary>
+    public async Task<string> SendRawAsync(string method, string path, string body, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+        }
+        using var response = await _h5Client.SendAsync(request, cancellationToken);
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
+        return $"{(int)response.StatusCode} {request.RequestUri}\n{content}";
     }
 
     private async Task PostH5Async<T>(string url, T body, CancellationToken cancellationToken)
