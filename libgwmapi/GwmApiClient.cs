@@ -27,7 +27,12 @@ public partial class GwmApiClient
         _h5Client.DefaultRequestHeaders.Add("brand", Header("brand", "3"));
         _h5Client.DefaultRequestHeaders.Add("language", Header("language", "en"));
         _h5Client.DefaultRequestHeaders.Add("systemType", Header("systemType", "1"));
-        _h5Client.DefaultRequestHeaders.Add("cver", Header("cver", ""));
+        //header set taken from the GWM ORA app 1.9.8 (com.ora.germany), request
+        //header interceptor - it sends appId/enterpriseId/channel/cVer on every call
+        _h5Client.DefaultRequestHeaders.Add("cVer", Header("cVer", "1.9.8"));
+        _h5Client.DefaultRequestHeaders.Add("appId", Header("appId", "3"));
+        _h5Client.DefaultRequestHeaders.Add("enterpriseId", Header("enterpriseId", "CC01"));
+        _h5Client.DefaultRequestHeaders.Add("channel", Header("channel", "APP"));
         _h5Client.BaseAddress = new Uri("https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
 
         _appClient = appClient;
@@ -36,6 +41,8 @@ public partial class GwmApiClient
         _appClient.DefaultRequestHeaders.Add("brand", Header("brand", "3"));
         _appClient.BaseAddress = new Uri("https://eu-app-gateway.gwmcloud.com/app-api/api/v1.0/");
 
+        AddExtraHeaders(_h5Client);
+        AddExtraHeaders(_appClient);
         LogHeaders();
     }
 
@@ -46,6 +53,21 @@ public partial class GwmApiClient
         return Environment.GetEnvironmentVariable($"GWM_HEADER_{name.ToUpperInvariant()}") ?? fallback;
     }
 
+    //GWM_EXTRA_HEADERS="enterpriseId=1,sign=deadbeef" - probe headers we do not send yet
+    private static void AddExtraHeaders(HttpClient client)
+    {
+        var extra = Environment.GetEnvironmentVariable("GWM_EXTRA_HEADERS");
+        if (String.IsNullOrWhiteSpace(extra)) return;
+        foreach (var pair in extra.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = pair.IndexOf('=');
+            if (separator <= 0) continue;
+            var name = pair[..separator].Trim();
+            client.DefaultRequestHeaders.Remove(name);
+            client.DefaultRequestHeaders.Add(name, pair[(separator + 1)..]);
+        }
+    }
+
     private void LogHeaders()
     {
         _logger.LogInformation("GWM client identity: terminal={Terminal} brand={Brand} rs={Rs} systemType={SystemType} cver='{Cver}'",
@@ -53,7 +75,7 @@ public partial class GwmApiClient
             _h5Client.DefaultRequestHeaders.GetValues("brand").First(),
             _h5Client.DefaultRequestHeaders.GetValues("rs").First(),
             _h5Client.DefaultRequestHeaders.GetValues("systemType").First(),
-            _h5Client.DefaultRequestHeaders.GetValues("cver").First());
+            _h5Client.DefaultRequestHeaders.GetValues("cVer").First());
     }
 
     public string Language
@@ -73,6 +95,9 @@ public partial class GwmApiClient
         {
             _h5Client.DefaultRequestHeaders.Remove("country");
             _h5Client.DefaultRequestHeaders.Add("country", value);
+            //the app sends regionCode next to country (both "DE" for Germany)
+            _h5Client.DefaultRequestHeaders.Remove("regionCode");
+            _h5Client.DefaultRequestHeaders.Add("regionCode", value);
             _appClient.DefaultRequestHeaders.Remove("country");
             _appClient.DefaultRequestHeaders.Add("country", value);
         }

@@ -38,6 +38,7 @@ public partial class GwmApiClient
 
     public Task<RefreshTokenResponse> RefreshTokenAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
     {
-        return PostH5Async<RefreshTokenRequest, RefreshTokenResponse>("userAuth/refreshToken", request, cancellationToken);
+        var path = Environment.GetEnvironmentVariable("GWM_REFRESH_PATH") ?? "userAuth/refreshToken";
+        return PostH5Async<RefreshTokenRequest, RefreshTokenResponse>(path, request, cancellationToken);
     }
 }
