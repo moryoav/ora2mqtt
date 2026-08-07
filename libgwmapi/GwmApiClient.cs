@@ -22,19 +22,38 @@ public partial class GwmApiClient
     {
         _logger = loggerFactory.CreateLogger<GwmApiClient>();
         _h5Client = h5Client;
-        _h5Client.DefaultRequestHeaders.Add("rs", "2");
-        _h5Client.DefaultRequestHeaders.Add("terminal", "GW_APP_ORA");
-        _h5Client.DefaultRequestHeaders.Add("brand", "3");
-        _h5Client.DefaultRequestHeaders.Add("language", "en");
-        _h5Client.DefaultRequestHeaders.Add("systemType", "1");
-        _h5Client.DefaultRequestHeaders.Add("cver", "");
+        _h5Client.DefaultRequestHeaders.Add("rs", Header("rs", "2"));
+        _h5Client.DefaultRequestHeaders.Add("terminal", Header("terminal", "GW_APP_ORA"));
+        _h5Client.DefaultRequestHeaders.Add("brand", Header("brand", "3"));
+        _h5Client.DefaultRequestHeaders.Add("language", Header("language", "en"));
+        _h5Client.DefaultRequestHeaders.Add("systemType", Header("systemType", "1"));
+        _h5Client.DefaultRequestHeaders.Add("cver", Header("cver", ""));
         _h5Client.BaseAddress = new Uri("https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
-        
+
         _appClient = appClient;
-        _appClient.DefaultRequestHeaders.Add("rs", "2");
-        _appClient.DefaultRequestHeaders.Add("terminal", "GW_APP_ORA");
-        _appClient.DefaultRequestHeaders.Add("brand", "3");
+        _appClient.DefaultRequestHeaders.Add("rs", Header("rs", "2"));
+        _appClient.DefaultRequestHeaders.Add("terminal", Header("terminal", "GW_APP_ORA"));
+        _appClient.DefaultRequestHeaders.Add("brand", Header("brand", "3"));
         _appClient.BaseAddress = new Uri("https://eu-app-gateway.gwmcloud.com/app-api/api/v1.0/");
+
+        LogHeaders();
+    }
+
+    //allows probing which client identity the GWM backend still accepts,
+    //e.g. GWM_HEADER_TERMINAL=GW_APP_GWM GWM_HEADER_BRAND=6
+    private static string Header(string name, string fallback)
+    {
+        return Environment.GetEnvironmentVariable($"GWM_HEADER_{name.ToUpperInvariant()}") ?? fallback;
+    }
+
+    private void LogHeaders()
+    {
+        _logger.LogInformation("GWM client identity: terminal={Terminal} brand={Brand} rs={Rs} systemType={SystemType} cver='{Cver}'",
+            _h5Client.DefaultRequestHeaders.GetValues("terminal").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("brand").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("rs").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("systemType").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("cver").First());
     }
 
     public string Language
