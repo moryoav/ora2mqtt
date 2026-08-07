@@ -50,11 +50,28 @@ beliebiger nonce ok, solange Header == signString-nonce. ts = `currentMicros/100
 enterpriseId=CC01, channel=APP, cVer, regionCode, systemType, rs=2, country, language,
 deviceId, secVersion=2.0, gwId, iccid, ip, gray-version, communityBrand.
 
-## ⚠️ Status: NICHT server-validiert
-Live gegen `captcha/gen`/`loginWithPassword`/`getVerifyCode`: mit dieser Formel weiterhin
-`550002 System busy`, **identisch zu no-sign / falschem Sign**. Der Server discriminiert
-also nicht sichtbar → entweder Rest-Diskrepanz im Encoding, die nur ein Frida-Hook des
-echten sha256-Inputs auflöst (App crasht unter x86-Translation wg. SecNeo-Packer), oder
-`550002` ist für diese Endpunkte gar nicht der Sign-Gate. Referenz-Signer:
-`~/…/scratchpad/sign_final.py`. Nächster definitiver Schritt: arm64-Voll-Emulation +
-Frida-Hook auf `Digest.toString`-Input, um die exakte Byte-Sequenz zu sehen.
+## ✅ Status: SERVER-VALIDIERT (GET + POST)
+Ground Truth per Frida-Hook auf `Uri.encodeComponent`-Input (My GWM 1.3.0 in Waydroid
+auf arm64-Cloud-VM). Zwei echte Sign-Strings:
+```
+GET/app-api/api/v1.0/complaintsComments/appInitConfig
+   gwm-auth-appkey:1874226830 gwm-auth-nonce:<16hex> gwm-auth-timestamp:<ms>
+   1eb6caa16ff203c96daf7f06309b8998
+
+POST/app-api/api/v2.0/userAuth/getVerifyCode
+   gwm-auth-appkey:1874226830 gwm-auth-nonce:<16hex> gwm-auth-timestamp:<ms>
+   json={"type":"1","account":"…","accountType":"2","countryCode":"+49",
+         "validCodeMode":1,"operateCode":"","captchaType":"","captchaId":"","token":""}
+   1eb6caa16ff203c96daf7f06309b8998
+```
+Live-Verifikation mit `tools/gwm_v2_sign.py`:
+- GET `appInitConfig` → **`000000 SUCCESS`**
+- POST `getVerifyCode` (exakter App-Body) → **`6500034 Graphic code expired`**
+  (= Sign akzeptiert, Business-Logik erreicht — kein `550002` mehr)
+
+**Frühere `550002`-Fehlschläge**: (1) ich nahm die volle URL statt des relativen Pfads;
+(2) POST-Tests mit falschen Body-Feldern (Business-Validierung, nicht Sign). `json=` + der
+kompakte JSON-Body (Feld-Reihenfolge = App-Insertion-Order) ist korrekt.
+
+Reproduktion des Hooks: [[reference_frida_android_vm]] (Waydroid + frida + blutter_frida.js,
+`onLibappLoaded` → `encodeComponent` @0x5da7bc, Filter auf `gwm-auth-appkey`).
