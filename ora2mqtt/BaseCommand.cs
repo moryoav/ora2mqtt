@@ -36,8 +36,11 @@ public abstract class BaseCommand
         var certHandler = new CertificateHandler();
         var httpHandler = new HttpClientHandler();
         httpHandler.ClientCertificateOptions = ClientCertificateOption.Manual;
-        using (var cert = certHandler.CertificateWithPrivateKey)
+        //GWM_NO_CLIENT_CERT=1 skips the client certificate, to check whether the
+        //gateway enforces mutual TLS at all
+        if (Environment.GetEnvironmentVariable("GWM_NO_CLIENT_CERT") != "1")
         {
+            using var cert = certHandler.CertificateWithPrivateKey;
             var pkcs12 = new X509Certificate2(cert.Export(X509ContentType.Pkcs12));
             httpHandler.ClientCertificates.Add(pkcs12);
         }

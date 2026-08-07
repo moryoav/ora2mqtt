@@ -132,6 +132,7 @@ namespace ora2mqtt
                     Country = "DE",
                     DeviceId = options.DeviceId,
                     Model = "ora2mqtt",
+                    PushToken = "",
                     SmsCode = code
                 };
                 var token = await client.LoginWithSmsAsync(loginRequest, cancellationToken);
