@@ -27,6 +27,7 @@ public class RunCommand:BaseCommand
     private static readonly TimeSpan RemoteCommandResultPollInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan DiscoveryRepublishInterval = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxFailureBackoff = TimeSpan.FromMinutes(15);
 
     private ILogger _logger;
     private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
@@ -95,10 +96,22 @@ public class RunCommand:BaseCommand
             catch (Exception ex)
             {
                 consecutiveFailures++;
+                var backoff = GetFailureBackoff(consecutiveFailures);
                 _logger.LogWarning(ex,
-                    "Cycle failed (#{Count} consecutive). Sleeping {Interval}s and retrying. " +
+                    "Cycle failed (#{Count} consecutive). Sleeping {Backoff} and retrying. " +
                     "Common causes: transient GWM-cloud 5xx, network blip, MQTT publish error",
-                    consecutiveFailures, Intervall);
+                    consecutiveFailures, backoff);
+                try
+                {
+                    //back off instead of hammering the API on every interval - a dead
+                    //refresh token would otherwise produce thousands of requests per day
+                    await Task.Delay(backoff, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                continue;
             }
             try
             {
@@ -111,6 +124,15 @@ public class RunCommand:BaseCommand
         }
         _logger.LogInformation("Run loop stopped");
         return 0;
+    }
+
+    private TimeSpan GetFailureBackoff(int consecutiveFailures)
+    {
+        var exponent = Math.Min(consecutiveFailures - 1, 16);
+        var seconds = Intervall * Math.Pow(2, exponent);
+        return seconds >= MaxFailureBackoff.TotalSeconds
+            ? MaxFailureBackoff
+            : TimeSpan.FromSeconds(seconds);
     }
 
     private bool ShouldPublishDiscoveryNow()
@@ -456,7 +478,18 @@ public class RunCommand:BaseCommand
             RefreshToken = options.Account.RefreshToken,
         };
         client.SetAccessToken("");
-        var response = await client.RefreshTokenAsync(refresh, cancellationToken);
+        RefreshTokenResponse response;
+        try
+        {
+            response = await client.RefreshTokenAsync(refresh, cancellationToken);
+        }
+        catch
+        {
+            //put the old token back - otherwise every following cycle fails with
+            //"Empty accessToken" and forces another refresh, even if the token still works
+            client.SetAccessToken(options.Account.AccessToken);
+            throw;
+        }
         options.Account.AccessToken = response.AccessToken;
         options.Account.RefreshToken = response.RefreshToken;
         await SaveConfigAsync(options, cancellationToken);
