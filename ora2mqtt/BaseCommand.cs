@@ -33,59 +33,65 @@ public abstract class BaseCommand
 
     protected GwmApiClient ConfigureApiClient(Ora2MqttOptions options)
     {
-        var certHandler = new CertificateHandler();
-        var httpHandler = new HttpClientHandler();
-        httpHandler.ClientCertificateOptions = ClientCertificateOption.Manual;
-        //GWM_NO_CLIENT_CERT=1 skips the client certificate, to check whether the
-        //gateway enforces mutual TLS at all
-        if (Environment.GetEnvironmentVariable("GWM_NO_CLIENT_CERT") != "1")
-        {
-            using var cert = certHandler.CertificateWithPrivateKey;
-            var pkcs12 = new X509Certificate2(cert.Export(X509ContentType.Pkcs12));
-            httpHandler.ClientCertificates.Add(pkcs12);
-        }
-
-        //TODO check how this behaves on linux and mac
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            //add intermediates to local cert store, so they get sent with the request
-            //https://github.com/dotnet/runtime/issues/55368#issuecomment-876775809
-            var store = new X509Store(StoreName.CertificateAuthority, StoreLocation.CurrentUser);
-            store.Open(OpenFlags.ReadWrite);
-            var certs = certHandler.Chain;
-            foreach (var cert in certs)
-            {
-                if (cert.Issuer != cert.Subject)
-                {
-                    store.Add(cert);
-                }
-            }
-        }
-
         var httpLogger = LoggerFactory.CreateLogger<HttpClient>();
         var httpOptions = new HttpClientFactoryOptions
         {
             ShouldRedactHeaderValue = x => "accessToken".Equals(x, StringComparison.InvariantCultureIgnoreCase)
         };
-        var h5Client = new HttpClient(new GwmSigningHandler
+
+        HttpClient Build(X509Certificate2 clientCert)
         {
-            InnerHandler = new LoggingHttpMessageHandler(httpLogger, httpOptions)
+            var inner = new HttpClientHandler { ClientCertificateOptions = ClientCertificateOption.Manual };
+            if (clientCert is not null) inner.ClientCertificates.Add(clientCert);
+            return new HttpClient(new GwmSigningHandler
             {
-                InnerHandler = new HttpClientHandler()
-            }
-        });
-        var appClient = new HttpClient(new GwmSigningHandler
+                InnerHandler = new LoggingHttpMessageHandler(httpLogger, httpOptions) { InnerHandler = inner }
+            });
+        }
+
+        // h5-gateway (auth) does not enforce mTLS; the app-gateway does.
+        var h5Client = Build(null);
+
+        // app-gateway now wants the enrolled per-install certificate; the shared bootstrap
+        // certificate only still works on the common gateway (applyCertificate).
+        X509Certificate2 enrolled = null;
+        if (!string.IsNullOrEmpty(options.Account.ClientCertificate) &&
+            !string.IsNullOrEmpty(options.Account.ClientCertificateKey))
         {
-            InnerHandler = new LoggingHttpMessageHandler(httpLogger, httpOptions)
-            {
-                InnerHandler = httpHandler
-            }
-        });
-        return new GwmApiClient(h5Client, appClient, LoggerFactory)
+            enrolled = CertificateEnrollment.Load(options.Account.ClientCertificate, options.Account.ClientCertificateKey);
+        }
+        var appClient = Build(enrolled);
+
+        // bootstrap certificate for applyCertificate
+        X509Certificate2 bootstrap = null;
+        if (Environment.GetEnvironmentVariable("GWM_NO_CLIENT_CERT") != "1")
+        {
+            using var cert = new CertificateHandler().CertificateWithPrivateKey;
+            bootstrap = new X509Certificate2(cert.Export(X509ContentType.Pkcs12));
+        }
+        var certificateClient = Build(bootstrap);
+
+        return new GwmApiClient(h5Client, appClient, certificateClient, LoggerFactory)
         {
             Country = options.Country,
             DeviceId = options.DeviceId
         };
+    }
+
+    // enroll a per-install client certificate for the mTLS app-gateway (needs a valid token)
+    protected async Task EnrollCertificateAsync(GwmApiClient client, Ora2MqttOptions options, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrEmpty(options.Account.ClientCertificate)) return;
+        var csr = CertificateEnrollment.GenerateCsr(options.Country, options.DeviceId);
+        client.SetCertificateDeviceId(csr.EnrollmentDeviceId);
+        var response = await client.ApplyCertificateAsync(
+            new libgwmapi.DTO.AppAuth.ApplyCertificateRequest
+            {
+                Csr = csr.Csr,
+                Phone = options.Account.GwId,
+            }, cancellationToken);
+        options.Account.ClientCertificate = response.Encoded;
+        options.Account.ClientCertificateKey = csr.PrivateKey;
     }
 
     protected async Task SaveConfigAsync(Ora2MqttOptions options, CancellationToken cancellationToken)

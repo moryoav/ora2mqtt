@@ -11,6 +11,7 @@ public partial class GwmApiClient
     public static readonly string AppHttpClientName = "eu-app-gateway";
     private readonly HttpClient _h5Client;
     private readonly HttpClient _appClient;
+    private readonly HttpClient _certificateClient;
     private readonly Uri _h5V2Base;
     private readonly ILogger<GwmApiClient> _logger;
 
@@ -34,12 +35,12 @@ public partial class GwmApiClient
         Set("systemType", "1");
     }
 
-    public GwmApiClient(IHttpClientFactory factory, ILoggerFactory loggerFactory)
-        : this(factory.CreateClient(H5HttpClientName), factory.CreateClient(AppHttpClientName), loggerFactory)
+    public GwmApiClient(HttpClient h5Client, HttpClient appClient, ILoggerFactory loggerFactory)
+        : this(h5Client, appClient, null, loggerFactory)
     {
     }
 
-    public GwmApiClient(HttpClient h5Client, HttpClient appClient, ILoggerFactory loggerFactory)
+    public GwmApiClient(HttpClient h5Client, HttpClient appClient, HttpClient certificateClient, ILoggerFactory loggerFactory)
     {
         _logger = loggerFactory.CreateLogger<GwmApiClient>();
         _h5Client = h5Client;
@@ -52,6 +53,14 @@ public partial class GwmApiClient
         _appClient = appClient;
         AddIdentityHeaders(_appClient);
         _appClient.BaseAddress = new Uri("https://eu-app-gateway.gwmcloud.com/app-api/api/v1.0/");
+
+        // applyCertificate lives on the common app-gateway and uses the bootstrap cert
+        _certificateClient = certificateClient ?? appClient;
+        if (!ReferenceEquals(_certificateClient, _appClient))
+        {
+            AddIdentityHeaders(_certificateClient);
+            _certificateClient.BaseAddress = new Uri("https://eu-app-gateway-common.gwmcloud.com/app-api/api/v1.0/");
+        }
 
         AddExtraHeaders(_h5Client);
         AddExtraHeaders(_appClient);
@@ -92,7 +101,7 @@ public partial class GwmApiClient
 
     private void SetOnBoth(string name, string value)
     {
-        foreach (var client in new[] { _h5Client, _appClient })
+        foreach (var client in new[] { _h5Client, _appClient, _certificateClient }.Distinct())
         {
             client.DefaultRequestHeaders.Remove(name);
             if (value is not null) client.DefaultRequestHeaders.Add(name, value);
@@ -134,11 +143,23 @@ public partial class GwmApiClient
 
     public void SetAccessToken(string accessToken)
     {
-        _h5Client.DefaultRequestHeaders.Remove("accessToken");
-        _h5Client.DefaultRequestHeaders.Add("accessToken", accessToken);
+        SetOnBoth("accessToken", accessToken);
+    }
 
-        _appClient.DefaultRequestHeaders.Remove("accessToken");
-        _appClient.DefaultRequestHeaders.Add("accessToken", accessToken);
+    // applyCertificate expects a per-enrollment deviceId (and matching iccid) on the cert client
+    public void SetCertificateDeviceId(string value)
+    {
+        _certificateClient.DefaultRequestHeaders.Remove("deviceId");
+        _certificateClient.DefaultRequestHeaders.Add("deviceId", value);
+        _certificateClient.DefaultRequestHeaders.Remove("iccid");
+        _certificateClient.DefaultRequestHeaders.Add("iccid", value);
+    }
+
+    public async Task<DTO.AppAuth.ApplyCertificateResponse> ApplyCertificateAsync(
+        DTO.AppAuth.ApplyCertificateRequest request, CancellationToken cancellationToken)
+    {
+        var response = await _certificateClient.PostAsJsonAsync("appAuth/applyCertificate", request, cancellationToken);
+        return await GetResponseAsync<DTO.AppAuth.ApplyCertificateResponse>(response, cancellationToken);
     }
 
     /// <summary>

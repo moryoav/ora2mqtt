@@ -80,13 +80,25 @@ public class LoginCommand : BaseCommand
         config.Account.RefreshToken = token.RefreshToken;
         config.Account.GwId = token.GwId;
         config.Account.BeanId = token.BeanId;
+
+        client.SetAccessToken(token.AccessToken);
+        try
+        {
+            await EnrollCertificateAsync(client, config, cancellationToken);
+            _logger.LogInformation("client certificate enrolled for the mTLS app-gateway");
+        }
+        catch (GwmApiException e)
+        {
+            _logger.LogWarning("certificate enrollment failed: {Code} {Message}", e.Code, e.Message);
+        }
+
         if (DryRun)
         {
             _logger.LogInformation("dry run, config not written");
             return 0;
         }
         await SaveConfigAsync(config, cancellationToken);
-        _logger.LogInformation("tokens written to {ConfigFile}", ConfigFile);
+        _logger.LogInformation("tokens + certificate written to {ConfigFile}", ConfigFile);
         return 0;
     }
 }

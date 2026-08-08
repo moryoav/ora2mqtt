@@ -57,6 +57,24 @@ public class RunCommand:BaseCommand
         }
 
         var api = GetGwmApiClient(config);
+
+        // enroll the mTLS client certificate on first run, then rebuild the client so the
+        // app-gateway calls use it
+        if (string.IsNullOrEmpty(config.Account.ClientCertificate))
+        {
+            try
+            {
+                await EnrollCertificateAsync(api, config, cancellationToken);
+                await SaveConfigAsync(config, cancellationToken);
+                _logger.LogInformation("enrolled mTLS client certificate");
+                api = GetGwmApiClient(config);
+            }
+            catch (GwmApiException e)
+            {
+                _logger.LogWarning("certificate enrollment failed: {Code} {Message}", e.Code, e.Message);
+            }
+        }
+
         using var mqtt = await ConnectMqttAsync(config, api, cancellationToken);
 
         var discoveryEnabled = config.Mqtt.HomeAssistantDiscoveryTopic is not null;
