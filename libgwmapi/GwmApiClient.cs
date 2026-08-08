@@ -11,7 +11,28 @@ public partial class GwmApiClient
     public static readonly string AppHttpClientName = "eu-app-gateway";
     private readonly HttpClient _h5Client;
     private readonly HttpClient _appClient;
+    private readonly Uri _h5V2Base;
     private readonly ILogger<GwmApiClient> _logger;
+
+    // My GWM app identity (v2). terminal/brand pair is validated by the backend
+    // (mismatch -> 551008). appId 1 / enterpriseId CC01 / secVersion 2.0 as sent by the app.
+    private static void AddIdentityHeaders(HttpClient client)
+    {
+        void Set(string name, string fallback)
+        {
+            client.DefaultRequestHeaders.Remove(name);
+            client.DefaultRequestHeaders.Add(name, Header(name, fallback));
+        }
+        Set("rs", "2");
+        Set("terminal", "GW_APP_GWM");
+        Set("brand", "6");
+        Set("appId", "1");
+        Set("enterpriseId", "CC01");
+        Set("channel", "APP");
+        Set("cVer", "1.3.0");
+        Set("secVersion", "2.0");
+        Set("systemType", "1");
+    }
 
     public GwmApiClient(IHttpClientFactory factory, ILoggerFactory loggerFactory)
         : this(factory.CreateClient(H5HttpClientName), factory.CreateClient(AppHttpClientName), loggerFactory)
@@ -22,24 +43,14 @@ public partial class GwmApiClient
     {
         _logger = loggerFactory.CreateLogger<GwmApiClient>();
         _h5Client = h5Client;
-        _h5Client.DefaultRequestHeaders.Add("rs", Header("rs", "2"));
-        _h5Client.DefaultRequestHeaders.Add("terminal", Header("terminal", "GW_APP_ORA"));
-        _h5Client.DefaultRequestHeaders.Add("brand", Header("brand", "3"));
+        AddIdentityHeaders(_h5Client);
         _h5Client.DefaultRequestHeaders.Add("language", Header("language", "en"));
-        _h5Client.DefaultRequestHeaders.Add("systemType", Header("systemType", "1"));
-        //header set taken from the GWM ORA app 1.9.8 (com.ora.germany), request
-        //header interceptor - it sends appId/enterpriseId/channel/cVer on every call
-        _h5Client.DefaultRequestHeaders.Add("cVer", Header("cVer", "1.9.8"));
-        _h5Client.DefaultRequestHeaders.Add("appId", Header("appId", "3"));
-        _h5Client.DefaultRequestHeaders.Add("enterpriseId", Header("enterpriseId", "CC01"));
-        _h5Client.DefaultRequestHeaders.Add("channel", Header("channel", "APP"));
         _h5Client.BaseAddress = new Uri(Environment.GetEnvironmentVariable("GWM_H5_BASE")
             ?? "https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
+        _h5V2Base = new Uri("https://eu-h5-gateway.gwmcloud.com/app-api/api/v2.0/");
 
         _appClient = appClient;
-        _appClient.DefaultRequestHeaders.Add("rs", Header("rs", "2"));
-        _appClient.DefaultRequestHeaders.Add("terminal", Header("terminal", "GW_APP_ORA"));
-        _appClient.DefaultRequestHeaders.Add("brand", Header("brand", "3"));
+        AddIdentityHeaders(_appClient);
         _appClient.BaseAddress = new Uri("https://eu-app-gateway.gwmcloud.com/app-api/api/v1.0/");
 
         AddExtraHeaders(_h5Client);
@@ -79,14 +90,19 @@ public partial class GwmApiClient
             _h5Client.DefaultRequestHeaders.GetValues("cVer").First());
     }
 
+    private void SetOnBoth(string name, string value)
+    {
+        foreach (var client in new[] { _h5Client, _appClient })
+        {
+            client.DefaultRequestHeaders.Remove(name);
+            if (value is not null) client.DefaultRequestHeaders.Add(name, value);
+        }
+    }
+
     public string Language
     {
         get => _h5Client.DefaultRequestHeaders.GetValues("language").FirstOrDefault();
-        set
-        {
-            _h5Client.DefaultRequestHeaders.Remove("language");
-            _h5Client.DefaultRequestHeaders.Add("language", value);
-        }
+        set => SetOnBoth("language", value);
     }
 
     public string Country
@@ -94,14 +110,16 @@ public partial class GwmApiClient
         get => _h5Client.DefaultRequestHeaders.GetValues("country").FirstOrDefault();
         set
         {
-            _h5Client.DefaultRequestHeaders.Remove("country");
-            _h5Client.DefaultRequestHeaders.Add("country", value);
+            SetOnBoth("country", value);
             //the app sends regionCode next to country (both "DE" for Germany)
-            _h5Client.DefaultRequestHeaders.Remove("regionCode");
-            _h5Client.DefaultRequestHeaders.Add("regionCode", value);
-            _appClient.DefaultRequestHeaders.Remove("country");
-            _appClient.DefaultRequestHeaders.Add("country", value);
+            SetOnBoth("regionCode", value);
         }
+    }
+
+    // the app sends the deviceId header on every request
+    public string DeviceId
+    {
+        set => SetOnBoth("deviceId", value);
     }
 
     public bool HasAccessToken
@@ -155,6 +173,20 @@ public partial class GwmApiClient
     {
         var response = await _h5Client.PostAsJsonAsync(url, body, cancellationToken);
         return await GetResponseAsync<TOut>(response, cancellationToken);
+    }
+
+    // v2 auth endpoints live under /app-api/api/v2.0/ on the same h5 host; posting to an
+    // absolute uri overrides the client's v1.0 base while keeping identity headers + signing.
+    private async Task<TOut> PostH5V2Async<TIn, TOut>(string path, TIn body, CancellationToken cancellationToken)
+    {
+        var response = await _h5Client.PostAsJsonAsync(new Uri(_h5V2Base, path), body, cancellationToken);
+        return await GetResponseAsync<TOut>(response, cancellationToken);
+    }
+
+    private async Task PostH5V2Async<TIn>(string path, TIn body, CancellationToken cancellationToken)
+    {
+        var response = await _h5Client.PostAsJsonAsync(new Uri(_h5V2Base, path), body, cancellationToken);
+        await CheckResponseAsync(response, cancellationToken);
     }
 
     private async Task<T> GetH5Async<T>(string url, CancellationToken cancellationToken)

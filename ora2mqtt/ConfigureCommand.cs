@@ -103,45 +103,58 @@ namespace ora2mqtt
                     _logger.LogError($"Token refresh failed: {e.Message}");
                 }
             }
-            var request = new LoginAccountRequest
+            var account = Prompt.Input<string>("Please enter your mail address");
+            var password = Prompt.Password("Please enter your password");
+            var callingCode = CallingCode(options.Country);
+            var request = new EuLoginWithPasswordRequest
             {
+                Account = account,
+                Password = password,
                 Country = options.Country,
-                IsEncrypt = false,
+                CountryCode = callingCode,
                 DeviceId = options.DeviceId,
-                Model = "ora2mqtt",
-                PushToken = "",
-                Account = Prompt.Input<string>("Please enter your mail address"),
-                Password = Prompt.Password("Please enter your password")
             };
             try
             {
-                var token = await client.LoginAccountAsync(request, cancellationToken);
-                options.Account.AccessToken = token.AccessToken;
-                options.Account.RefreshToken = token.RefreshToken;
-                options.Account.GwId = token.GwId;
-                options.Account.BeanId = token.BeanId;
+                var token = await client.LoginWithPasswordAsync(request, cancellationToken);
+                StoreTokens(options, token);
             }
-            catch (GwmApiException e) when (e.Code == "110641")
+            catch (GwmApiException e) when (e.Code is "110641" or "308103")
             {
-                //SMS Login
-                await client.GetSmsCodeAsync(new GetSmsCode { Email = request.Account }, cancellationToken);
-                var code = Prompt.Password("Code required. Please check your mail and enter the 4 digit code");
-                var loginRequest = new LoginWithSmsRequest
+                //untrusted device: GWM wants an e-mail verification code
+                await client.GetVerifyCodeAsync(new EuGetVerifyCodeRequest
                 {
-                    Email = request.Account,
-                    Country = "DE",
-                    DeviceId = options.DeviceId,
-                    Model = "ora2mqtt",
-                    PushToken = "",
-                    SmsCode = code
-                };
-                var token = await client.LoginWithSmsAsync(loginRequest, cancellationToken);
-                options.Account.AccessToken = token.AccessToken;
-                options.Account.RefreshToken = token.RefreshToken;
-                options.Account.GwId = token.GwId;
-                options.Account.BeanId = token.BeanId;
+                    Account = account,
+                    CountryCode = callingCode,
+                }, cancellationToken);
+                var code = Prompt.Password("Code required. Please check your mail and enter the code");
+                await client.CheckVerifyCodeAsync(new EuCheckVerifyCodeRequest
+                {
+                    Account = account,
+                    CountryCode = callingCode,
+                    VerifyCode = code,
+                }, cancellationToken);
+                request.VerifyCode = code;
+                request.ValidCodeMode = "1";
+                var token = await client.LoginWithPasswordAsync(request, cancellationToken);
+                StoreTokens(options, token);
             }
         }
+
+        private static void StoreTokens(Ora2MqttOptions options, LoginAccountResponse token)
+        {
+            options.Account.AccessToken = token.AccessToken;
+            options.Account.RefreshToken = token.RefreshToken;
+            options.Account.GwId = token.GwId;
+            options.Account.BeanId = token.BeanId;
+        }
+
+        private static string CallingCode(string country) => country switch
+        {
+            "GB" => "+44",
+            "EE" => "+372",
+            _ => "+49",
+        };
 
         private void ConfigureMqttAsync(Ora2MqttOptions oraOptions)
         {

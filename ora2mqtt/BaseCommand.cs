@@ -67,17 +67,24 @@ public abstract class BaseCommand
         {
             ShouldRedactHeaderValue = x => "accessToken".Equals(x, StringComparison.InvariantCultureIgnoreCase)
         };
-        var h5Client = new HttpClient(new LoggingHttpMessageHandler(httpLogger, httpOptions)
+        var h5Client = new HttpClient(new GwmSigningHandler
         {
-            InnerHandler = new HttpClientHandler()
+            InnerHandler = new LoggingHttpMessageHandler(httpLogger, httpOptions)
+            {
+                InnerHandler = new HttpClientHandler()
+            }
         });
-        var appClient = new HttpClient(new LoggingHttpMessageHandler(httpLogger, httpOptions)
+        var appClient = new HttpClient(new GwmSigningHandler
         {
-            InnerHandler = httpHandler
+            InnerHandler = new LoggingHttpMessageHandler(httpLogger, httpOptions)
+            {
+                InnerHandler = httpHandler
+            }
         });
         return new GwmApiClient(h5Client, appClient, LoggerFactory)
         {
-            Country = options.Country
+            Country = options.Country,
+            DeviceId = options.DeviceId
         };
     }
 

@@ -38,7 +38,24 @@ public partial class GwmApiClient
 
     public Task<RefreshTokenResponse> RefreshTokenAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
     {
-        var path = Environment.GetEnvironmentVariable("GWM_REFRESH_PATH") ?? "userAuth/refreshToken";
-        return PostH5Async<RefreshTokenRequest, RefreshTokenResponse>(path, request, cancellationToken);
+        // v2: refreshToken works again once requests are signed
+        return PostH5V2Async<RefreshTokenRequest, RefreshTokenResponse>("userAuth/refreshToken", request, cancellationToken);
+    }
+
+    // --- v2 (My GWM) auth ---
+
+    public Task<LoginAccountResponse> LoginWithPasswordAsync(EuLoginWithPasswordRequest request, CancellationToken cancellationToken)
+    {
+        return PostH5V2Async<EuLoginWithPasswordRequest, LoginAccountResponse>("userAuth/loginWithPassword", request, cancellationToken);
+    }
+
+    public Task GetVerifyCodeAsync(EuGetVerifyCodeRequest request, CancellationToken cancellationToken)
+    {
+        return PostH5V2Async("userAuth/getVerifyCode", request, cancellationToken);
+    }
+
+    public Task CheckVerifyCodeAsync(EuCheckVerifyCodeRequest request, CancellationToken cancellationToken)
+    {
+        return PostH5V2Async("userAuth/checkVerifyCode", request, cancellationToken);
     }
 }

@@ -42,45 +42,38 @@ public class LoginCommand : BaseCommand
         }
 
         var client = ConfigureApiClient(config);
+        var callingCode = config.Country switch { "GB" => "+44", "EE" => "+372", _ => "+49" };
+        var request = new EuLoginWithPasswordRequest
+        {
+            Account = Email,
+            Password = Password,
+            Country = config.Country,
+            CountryCode = callingCode,
+            DeviceId = config.DeviceId,
+        };
         LoginAccountResponse token;
         if (String.IsNullOrEmpty(Code))
         {
             try
             {
-                token = await client.LoginAccountAsync(new LoginAccountRequest
-                {
-                    Country = config.Country,
-                    IsEncrypt = false,
-                    DeviceId = config.DeviceId,
-                    Model = "ora2mqtt",
-                    PushToken = "",
-                    Account = Email,
-                    Password = Password,
-                }, cancellationToken);
-                _logger.LogInformation("password login succeeded, no verification code needed");
+                token = await client.LoginWithPasswordAsync(request, cancellationToken);
+                _logger.LogInformation("v2 password login succeeded, no verification code needed");
             }
-            catch (GwmApiException e) when (e.Code == "110641")
+            catch (GwmApiException e) when (e.Code is "110641" or "308103")
             {
                 _logger.LogWarning("GWM wants a verification code ({Message}). Requesting one...", e.Message);
-                await client.GetSmsCodeAsync(new GetSmsCode { Email = Email }, cancellationToken);
+                await client.GetVerifyCodeAsync(new EuGetVerifyCodeRequest { Account = Email, CountryCode = callingCode }, cancellationToken);
                 _logger.LogInformation("verification code sent, rerun with --code <code>");
                 return 2;
             }
         }
         else
         {
-            token = await client.LoginWithSmsAsync(new LoginWithSmsRequest
-            {
-                Email = Email,
-                Country = config.Country,
-                DeviceId = config.DeviceId,
-                Model = "ora2mqtt",
-                //loginAccount sends an empty string here, only loginWithSMS left it
-                //null - GWM answers a generic error once the code check has passed
-                PushToken = "",
-                SmsCode = Code,
-            }, cancellationToken);
-            _logger.LogInformation("sms login succeeded");
+            await client.CheckVerifyCodeAsync(new EuCheckVerifyCodeRequest { Account = Email, CountryCode = callingCode, VerifyCode = Code }, cancellationToken);
+            request.VerifyCode = Code;
+            request.ValidCodeMode = "1";
+            token = await client.LoginWithPasswordAsync(request, cancellationToken);
+            _logger.LogInformation("v2 verify-code login succeeded");
         }
 
         config.Account.AccessToken = token.AccessToken;
