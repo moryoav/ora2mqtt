@@ -28,12 +28,18 @@ public class RunCommand:BaseCommand
     private static readonly TimeSpan DiscoveryRepublishInterval = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MaxFailureBackoff = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan TokenRefreshLeeway = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan CertificateRenewalLeeway = TimeSpan.FromDays(30);
+    private static readonly TimeSpan CertificateRetryInterval = TimeSpan.FromHours(6);
 
     private ILogger _logger;
     private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _lastRemoteCommandStatuses = new(StringComparer.OrdinalIgnoreCase);
     private volatile bool _discoveryPublishRequested = true;
     private DateTime _lastDiscoveryPublishUtc = DateTime.MinValue;
+    private bool _verifyTokenWithApi;
+    private DateTime? _clientCertificateNotAfter;
+    private DateTime _nextCertificateAttemptUtc = DateTime.MinValue;
 
     [Option('i', "interval", Default = 10, HelpText = "GWM API polling interval")]
     public int Intervall { get; set; }
@@ -60,20 +66,7 @@ public class RunCommand:BaseCommand
 
         // enroll the mTLS client certificate on first run, then rebuild the client so the
         // app-gateway calls use it
-        if (string.IsNullOrEmpty(config.Account.ClientCertificate))
-        {
-            try
-            {
-                await EnrollCertificateAsync(api, config, cancellationToken);
-                await SaveConfigAsync(config, cancellationToken);
-                _logger.LogInformation("enrolled mTLS client certificate");
-                api = GetGwmApiClient(config);
-            }
-            catch (GwmApiException e)
-            {
-                _logger.LogWarning("certificate enrollment failed: {Code} {Message}", e.Code, e.Message);
-            }
-        }
+        api = await EnsureClientCertificateAsync(api, config, cancellationToken);
 
         using var mqtt = await ConnectMqttAsync(config, api, cancellationToken);
 
@@ -88,6 +81,7 @@ public class RunCommand:BaseCommand
             try
             {
                 await RefreshTokenAsync(api, config, cancellationToken);
+                api = await EnsureClientCertificateAsync(api, config, cancellationToken);
                 var shouldPublishDiscovery = discoveryEnabled && ShouldPublishDiscoveryNow();
                 if (shouldPublishDiscovery)
                 {
@@ -114,6 +108,9 @@ public class RunCommand:BaseCommand
             catch (Exception ex)
             {
                 consecutiveFailures++;
+                //the cached token expiry may be wrong (revoked server-side, clock skew) -
+                //ask the API again on the next cycle instead of trusting the JWT
+                _verifyTokenWithApi = true;
                 var backoff = GetFailureBackoff(consecutiveFailures);
                 _logger.LogWarning(ex,
                     "Cycle failed (#{Count} consecutive). Sleeping {Backoff} and retrying. " +
@@ -478,15 +475,28 @@ public class RunCommand:BaseCommand
 
     private async Task RefreshTokenAsync(GwmApiClient client, Ora2MqttOptions options, CancellationToken cancellationToken)
     {
-        try
+        //the JWT carries its own expiry (exp, in seconds - 24h lifetime), so the token can be
+        //checked locally. Probing the API every cycle cost one request per interval, which is
+        //~8600 pointless requests a day at the default 10s.
+        var expiry = TokenExpiry(options.Account.AccessToken);
+        if (!_verifyTokenWithApi && expiry is { } valid)
         {
-            //check token
-            await client.GetUserBaseInfoAsync(cancellationToken);
-            return;
+            if (valid - DateTimeOffset.UtcNow > TokenRefreshLeeway) return;
+            _logger.LogInformation("Access token expires {Expiry:u}, refreshing", valid);
         }
-        catch (GwmApiException e)
+        else
         {
-            _logger.LogError($"Access token expired ({e.Message}). Trying to refresh token...");
+            //no readable expiry, or the last cycle failed - let the API decide
+            try
+            {
+                await client.GetUserBaseInfoAsync(cancellationToken);
+                _verifyTokenWithApi = false;
+                return;
+            }
+            catch (GwmApiException e)
+            {
+                _logger.LogError($"Access token rejected ({e.Message}). Trying to refresh token...");
+            }
         }
 
         var refresh = new RefreshTokenRequest
@@ -502,6 +512,77 @@ public class RunCommand:BaseCommand
         options.Account.RefreshToken = response.RefreshToken;
         await SaveConfigAsync(options, cancellationToken);
         client.SetAccessToken(options.Account.AccessToken);
+        _verifyTokenWithApi = false;
+        _logger.LogInformation("Access token refreshed, valid until {Expiry:u}",
+            TokenExpiry(options.Account.AccessToken));
+    }
+
+    //JWT payload -> exp claim. Returns null when the token is not a readable JWT, in which
+    //case the caller falls back to asking the API.
+    private static DateTimeOffset? TokenExpiry(string accessToken)
+    {
+        if (String.IsNullOrEmpty(accessToken)) return null;
+        var parts = accessToken.Split('.');
+        if (parts.Length < 2) return null;
+        try
+        {
+            var payload = parts[1].Replace('-', '+').Replace('_', '/');
+            payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+            using var document = JsonDocument.Parse(Convert.FromBase64String(payload));
+            if (!document.RootElement.TryGetProperty("exp", out var exp)) return null;
+            if (!exp.TryGetInt64(out var seconds)) return null;
+            return DateTimeOffset.FromUnixTimeSeconds(seconds);
+        }
+        catch (Exception e) when (e is FormatException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Enrolls the mTLS client certificate when there is none, and renews it before it expires
+    /// - the enrolled certificate is only valid for a year, and the container runs for months.
+    /// Returns the client to keep using (rebuilt when a new certificate was enrolled).
+    /// </summary>
+    private async Task<GwmApiClient> EnsureClientCertificateAsync(GwmApiClient api, Ora2MqttOptions config, CancellationToken cancellationToken)
+    {
+        var hasCertificate = !String.IsNullOrEmpty(config.Account.ClientCertificate);
+        if (hasCertificate)
+        {
+            _clientCertificateNotAfter ??= CertificateEnrollment.NotAfterUtc(config.Account.ClientCertificate);
+            //unreadable expiry: leave it alone, the gateway is the authority on whether it works
+            if (_clientCertificateNotAfter is not { } notAfter) return api;
+            if (notAfter - DateTime.UtcNow > CertificateRenewalLeeway) return api;
+            if (DateTime.UtcNow < _nextCertificateAttemptUtc) return api;
+            _logger.LogInformation("Client certificate expires {NotAfter:u}, renewing", notAfter);
+        }
+
+        //EnrollCertificateAsync is a no-op while a certificate is stored, so the old one is
+        //cleared for the attempt - and put back when it fails, otherwise the next config write
+        //would persist the loss of a still valid certificate
+        var previousCertificate = config.Account.ClientCertificate;
+        var previousKey = config.Account.ClientCertificateKey;
+        config.Account.ClientCertificate = null;
+        config.Account.ClientCertificateKey = null;
+        try
+        {
+            await EnrollCertificateAsync(api, config, cancellationToken);
+            await SaveConfigAsync(config, cancellationToken);
+            _clientCertificateNotAfter = CertificateEnrollment.NotAfterUtc(config.Account.ClientCertificate);
+            _logger.LogInformation("Enrolled mTLS client certificate, valid until {NotAfter:u}",
+                _clientCertificateNotAfter);
+            return GetGwmApiClient(config);
+        }
+        catch (GwmApiException e)
+        {
+            config.Account.ClientCertificate = previousCertificate;
+            config.Account.ClientCertificateKey = previousKey;
+            _logger.LogWarning("Certificate enrollment failed: {Message}", e.Message);
+            //keep publishing with the old certificate while it is still accepted, and do not
+            //retry applyCertificate on every interval
+            _nextCertificateAttemptUtc = DateTime.UtcNow.Add(CertificateRetryInterval);
+            return api;
+        }
     }
 
     private async Task PublishStatusAsync(IMqttClient mqtt, GwmApiClient gwm, Ora2MqttMqttOptions options, bool publishHaDiscovery, CancellationToken cancellationToken)

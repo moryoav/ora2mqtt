@@ -43,6 +43,24 @@ public static class CertificateEnrollment
         return normalized.Length >= 32 ? normalized[..32] : normalized.PadRight(32, '0');
     }
 
+    /// <summary>
+    /// Expiry of an enrolled certificate, so it can be renewed before the app-gateway starts
+    /// rejecting it. Returns null when the stored certificate cannot be read.
+    /// </summary>
+    public static DateTime? NotAfterUtc(string encodedCertificate)
+    {
+        if (String.IsNullOrEmpty(encodedCertificate)) return null;
+        try
+        {
+            using var certificate = new X509Certificate2(Convert.FromBase64String(encodedCertificate));
+            return certificate.NotAfter.ToUniversalTime();
+        }
+        catch (Exception e) when (e is FormatException or CryptographicException)
+        {
+            return null;
+        }
+    }
+
     public static X509Certificate2 Load(string encodedCertificate, string encodedPrivateKey)
     {
         var certificate = new X509Certificate2(Convert.FromBase64String(encodedCertificate));

@@ -59,6 +59,11 @@ public class LoginCommand : BaseCommand
                 token = await client.LoginWithPasswordAsync(request, cancellationToken);
                 _logger.LogInformation("v2 password login succeeded, no verification code needed");
             }
+            catch (GwmApiException e) when (IsCaptchaRequired(e))
+            {
+                LogCaptchaRequired(_logger, e);
+                return 3;
+            }
             catch (GwmApiException e) when (e.Code is "110641" or "308103")
             {
                 _logger.LogWarning("GWM wants a verification code ({Message}). Requesting one...", e.Message);

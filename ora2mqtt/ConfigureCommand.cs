@@ -120,6 +120,11 @@ namespace ora2mqtt
                 var token = await client.LoginWithPasswordAsync(request, cancellationToken);
                 StoreTokens(options, token);
             }
+            catch (GwmApiException e) when (IsCaptchaRequired(e))
+            {
+                LogCaptchaRequired(_logger, e);
+                throw;
+            }
             catch (GwmApiException e) when (e.Code is "110641" or "308103")
             {
                 //untrusted device: GWM wants an e-mail verification code

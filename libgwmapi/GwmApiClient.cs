@@ -249,27 +249,41 @@ public partial class GwmApiClient
         }
         catch (JsonException) when (!response.IsSuccessStatusCode)
         {
-            response.EnsureSuccessStatusCode();
-            throw;
+            //not a GWM error body at all - report the status and what came back instead,
+            //otherwise a wrong API version looks like an empty, unexplained failure
+            throw HttpFailure(response, content);
         }
 
         if (result is null)
         {
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode) throw HttpFailure(response, content);
             throw new JsonException("GWM response body was empty.");
         }
 
-        CheckResponse(result);
-        response.EnsureSuccessStatusCode();
+        CheckResponse(result, response);
+        if (!response.IsSuccessStatusCode) throw HttpFailure(response, content);
         return result;
     }
 
-    private void CheckResponse(GwmResponse response)
+    private static GwmApiException HttpFailure(HttpResponseMessage response, string content)
     {
-        if (response.Code != "000000")
-        {
-            throw new GwmApiException(response.Code, response.Description);
-        }
+        return new GwmApiException(((int)response.StatusCode).ToString(),
+            String.IsNullOrWhiteSpace(content) ? "empty response body" : Snippet(content),
+            response.StatusCode, response.RequestMessage?.RequestUri?.AbsolutePath);
+    }
+
+    private static string Snippet(string content)
+    {
+        var single = content.ReplaceLineEndings(" ").Trim();
+        return single.Length <= 200 ? single : single[..200] + "...";
+    }
+
+    private void CheckResponse(GwmResponse response, HttpResponseMessage httpResponse)
+    {
+        if (response.Code == "000000") return;
+        throw new GwmApiException(response.Code, response.Description,
+            httpResponse.IsSuccessStatusCode ? null : httpResponse.StatusCode,
+            httpResponse.RequestMessage?.RequestUri?.AbsolutePath);
     }
 
     private class GwmResponse

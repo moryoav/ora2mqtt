@@ -94,6 +94,23 @@ public abstract class BaseCommand
         options.Account.ClientCertificateKey = csr.PrivateKey;
     }
 
+    // The v2 login can demand a captcha - the app has userAuth/captcha/gen + captcha/checkCaptcha
+    // and sends captchaId/captcha in the login body. That flow is not implemented here, and the
+    // error code GWM uses for it has never been observed, so match on the message and report it
+    // verbatim rather than silently failing with a generic login error.
+    protected static bool IsCaptchaRequired(GwmApiException e)
+    {
+        return e.Message is not null && e.Message.Contains("captcha", StringComparison.OrdinalIgnoreCase);
+    }
+
+    protected static void LogCaptchaRequired(ILogger logger, GwmApiException e)
+    {
+        logger.LogError("GWM is asking for a captcha: {Message}. ora2mqtt does not implement the " +
+                        "captcha flow (userAuth/captcha/gen + checkCaptcha, captchaId/captcha in the " +
+                        "login body). Log in once with the My GWM app, then retry - if this persists, " +
+                        "the captcha flow has to be built, see V2_FINDINGS.md.", e.Message);
+    }
+
     protected async Task SaveConfigAsync(Ora2MqttOptions options, CancellationToken cancellationToken)
     {
         var serializer = new Serializer();
