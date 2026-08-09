@@ -1,5 +1,21 @@
 # GWM v2 API — Analyse-Stand (2026-08-07)
 
+## Nachtrag 2026-08-09 — alles hier gemessen, nicht abgeleitet
+
+- **`refreshToken` ist auf `v1.0` geblieben.** Auf `v2.0` antwortet der Host
+  `HTTP 404` mit Body-Code `001 No message available`. Signiert wird er wie alles andere.
+- **Der `accessToken`-Header muss beim Refresh mitgeschickt werden**, zusätzlich zum
+  Body (`accessToken`, `refreshToken`, `deviceId`). Ohne Header: `Empty accessToken`.
+- **`607198 System busy` heißt nur „Refresh abgelehnt".** Reproduziert mit einem
+  absichtlich kaputten Refresh-Token gegen den *funktionierenden*, signierten v1.0-Endpunkt.
+  Die Deutung vom 04.08. („v1-Token-Minting abgeschaltet") lässt sich aus diesem Code
+  allein also **nicht** belegen — was am 04.08. wirklich fehlte, war die Signatur.
+- **JWT**: `exp` in Sekunden, `iat + 86400` → Access-Token lebt **24 h**. Damit lässt sich
+  der Ablauf lokal prüfen, statt vor jedem Zyklus einen API-Call zu verbrennen.
+- **`appAuth/applyCertificate` darf mehrfach laufen.** Sieben Enrollments an einem Tag,
+  das jeweils vorherige Zertifikat blieb weiter gültig (die Produktivinstanz lief mit dem
+  alten unverändert durch). Laufzeit je Zertifikat: **1 Jahr**.
+
 ## Ausgangslage
 ora2mqtt hängt seit **2026-08-04 10:12** in Endlosschleife. Token-Refresh gegen
 `app-api/api/v1.0/userAuth/refreshToken` → `607198 System busy, please try later`.
