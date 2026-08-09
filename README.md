@@ -1,35 +1,114 @@
-# Goal
+# ora2mqtt
 
-This is an application to publish the current status of a GWM ORA Funky Cat via MQTT and to send commands to the car via MQTT.
+Publishes the status of a GWM ORA (Funky Cat / ORA 03) to MQTT and sends remote commands
+back to the car. Includes Home Assistant MQTT discovery, so the car shows up as a device
+without any manual YAML.
 
-# Deep Gratitude
+This is a fork of [moryoav/ora2mqtt](https://github.com/moryoav/ora2mqtt), which continued
+[zivillian/ora2mqtt](https://github.com/zivillian/ora2mqtt) — all credit for the original
+work and the reverse engineering of the GWM API goes to them.
 
-Special thanks goes to the original creator, @zivillian (https://github.com/zivillian/ora2mqtt), who unfortunately stopped working on the original project. I'm trying to continue here where he left off.
+## What is different in this fork
 
-# I want to contribute...
+GWM shut down the v1 API's token minting on **2026-08-04**; every third-party client that
+used `userAuth/refreshToken` or `loginWithSMS` started getting `607198 System busy`. The My
+GWM app had moved to a signed **v2** API. This fork implements that flow:
 
-Very welcome! I currently don't have a plan for the next steps. Therefore, it's best if you [open an issue](https://github.com/moryoav/ora2mqtt/issues/new) and tell us what you plan to do, what you can do, what you want, what you need...
+- **v2 request signing** — the `gwm-auth-appkey` / `-nonce` / `-timestamp` / `-sign` headers.
+  Plain SHA-256 (not HMAC) over method, path, headers, params and secret, see
+  [V2_SIGN.md](V2_SIGN.md).
+- **v2 login** — `loginWithPassword` plus `getVerifyCode` / `checkVerifyCode` for the
+  e-mail code an unknown device gets asked for.
+- **mTLS certificate enrollment** — the app-gateway no longer accepts the bootstrap
+  certificate shipped in the app (`400 No required SSL certificate was sent`). The client now
+  enrolls its own per-install certificate via `appAuth/applyCertificate` and stores it in the
+  config file. This happens automatically on the first `run`.
 
-What I did to get to the current state can be found under [How to...?](#how-to)
+Beyond the v2 work:
 
-If you need help with this, you can also simply [open an issue](https://github.com/moryoav/ora2mqtt/issues/new).
+- **Home Assistant discovery** — one device with sensors, A/C switch + climate entity, door
+  lock, close-windows button and a remote command status sensor. Republished on reconnect and
+  on the HA birth message.
+- **Reliability** — the access token is kept when a refresh fails (a failed refresh used to
+  wipe it and hammer the API), exponential backoff up to 15 min on repeated failures, per-cycle
+  exception handling and persistent MQTT reconnect. The endless-loop wrapper script the old
+  README suggested is no longer needed.
 
-# Status
+Tested against the EU region with one ORA 03. Other regions (in particular AU/NZ, which uses
+a different app key) are not implemented.
 
-There is a command-line application that runs on Windows and can read the current values and publish them via MQTT.
+## Setup
 
-In the first step, the configuration file must be created with `ora2mqtt configure`. It's best to create an additional account and share the car with this account. Afterwards, the application can be started with `ora2mqtt run` or simply `ora2mqtt`. This should make the current values visible in MQTT.
+Create the config file — the wizard asks for country, account, MQTT broker, optional Home
+Assistant discovery and the vehicle security PIN:
 
-Remote commands such as the A/C switch also require the vehicle security PIN from the official app. The `configure` wizard can store it for you, or you can add it to the config file manually:
+```bash
+ora2mqtt configure
+```
+
+It is a good idea to create a second GWM account and share the car with it, rather than using
+your main account.
+
+Then start it:
+
+```bash
+ora2mqtt run      # or just: ora2mqtt
+ora2mqtt run -i 60   # slower polling, default is 10s
+```
+
+Remote commands (A/C, lock, windows) need the vehicle security PIN from the official app. The
+wizard stores it, or you add it manually:
 
 ```yaml
 account:
   securityPin: "123456"
 ```
 
-The PIN is hashed before the API request is sent.
+The PIN is hashed before it is sent.
 
-The values (SOC, Range, and Odometer) can be integrated into [evcc](https://github.com/evcc-io/evcc/) with the following configuration:
+### Docker
+
+This fork does not publish images, so build it yourself:
+
+```bash
+docker build -t ora2mqtt .
+docker run -d --restart=unless-stopped -v ./ora2mqtt.yml:/config/ora2mqtt.yml ora2mqtt
+```
+
+The image ships `gwm_root.pem` and sets `OPENSSL_CONF` already. Note that the config file is
+written back (tokens, enrolled certificate), so it has to be a writable bind mount, not a
+read-only one.
+
+### Running the binaries on Linux
+
+The GWM certificates need a relaxed OpenSSL security level, and the GWM root certificate has
+to be trusted:
+
+```bash
+sudo cp libgwmapi/Resources/gwm_root.pem /etc/ssl/certs/
+export OPENSSL_CONF=/path/to/openssl.cnf   # from this repository
+./ora2mqtt run
+```
+
+## MQTT topics
+
+Everything lives below `GWM/<VIN>/`:
+
+| Topic | Content |
+| ----- | ------- |
+| `status/items/<code>/value` | raw data point, see the table below |
+| `status/items/<code>/unit` | unit, when the API sends one |
+| `status/AcquisitionTime`, `status/UpdateTime` | timestamps in ms |
+| `status/Latitude`, `status/Longitude`, `status/Location` | position (`Location` is JSON) |
+| `status/ac/mode`, `status/ac/targetTemperature`, `status/ac/action` | A/C state for the climate entity |
+| `status/commandStatus` | result of the last remote command |
+| `command/ac` | `{"switchOrder":"1","temperature":"22","operationTime":"30"}` |
+| `command/ac/mode` | `off` / `cool` |
+| `command/ac/temperature` | target temperature, e.g. `22` |
+| `command/lock` | `LOCK` / `UNLOCK` |
+| `command/windows/close` | `PRESS` |
+
+## evcc
 
 ```yaml
 vehicles:
@@ -40,172 +119,75 @@ vehicles:
   phases: 3
   soc:
     source: mqtt
-    topic: GWM/<vehicleId>/status/items/2013021/value
+    topic: GWM/<VIN>/status/items/2013021/value
     timeout: 1m
   range:
     source: mqtt
-    topic: GWM/<vehicleId>/status/items/2011501/value
+    topic: GWM/<VIN>/status/items/2011501/value
     timeout: 1m
   odometer:
     source: mqtt
-    topic: GWM/<vehicleId>/status/items/2103010/value
+    topic: GWM/<VIN>/status/items/2103010/value
     timeout: 1m
 ```
 
-## Linux
+## Data points
 
-For the binaries to run under Linux, the root certificate must be installed. Download the [`gwm_root.pem`](libgwmapi/Resources/gwm_root.pem) certificate from the repository and copy it to the system's certificate folder with `sudo cp gwm_root.pem /etc/ssl/certs/`.
+| Code | Description |
+| ---- | ----------- |
+| 2011501 | Range in km |
+| 2013021 | SOC |
+| 2013022 | Remaining charging time in minutes |
+| 2041142 | Charging active |
+| 2041301 | SOCE |
+| 2042082 | Bool flag, only active while charging (but not always) |
+| 2101001–2101004 | Tire pressure FL / FR / RL / RR in kPa |
+| 2101005–2101008 | Tire temperature FL / FR / RL / RR in °C |
+| 2103010 | Odometer in km |
+| 2201001 | Interior temperature in tenths of °C |
+| 2202001 | Air conditioning on |
+| 2208001 | Lock open |
+| 2210001–2210004 | Window closed FL / FR / RL / RR |
 
-Additionally, the [`openssl.cnf`](openssl.cnf) must be downloaded from the repository. Afterwards, the binaries from the release can be started with the following script.
+Published but still unidentified: 2013023, 2042071, 2078020, 2102001–2102010, 2210010–2210013,
+2222001, 2310001.
 
-```
-#/bin/bash
+## Troubleshooting
 
-export OPENSSL_CONF=/path/to/the/file/openssl.cnf
-cd /path/to/the/binary/ora2mqtt/
+**`Code required. Please check your mail`** — GWM treats the `deviceId` in the config as a new
+device and wants an e-mail code (`308103` / `110641`). Enter it once; the token survives from
+there via refresh.
 
-# restart when failed
-while :
-do
-    ./ora2mqtt -i 60
-    sleep 30
-done
-```
+**`400 No required SSL certificate was sent`** — the certificate enrollment did not run or
+failed. Delete `account.clientCertificate` / `clientCertificateKey` from the config and start
+`run` again; it re-enrolls with a valid token.
 
-The script restarts the program in an endless loop if the connection is lost. In addition, the polling interval is increased from 10s to 60s to reduce the number of requests to the GMW server.
+**Repeated `System busy`** — usually a transient GWM cloud problem. The run loop backs off up
+to 15 minutes on its own; do not restart it in a tight loop, the API rate-limits hard.
 
-## Docker
+## Development
 
-There is now also a Docker container. The config must be created beforehand with `ora2mqtt configure`:
+Two extra verbs help when GWM changes the backend again:
 
 ```bash
-docker run -d --restart=unless-stopped -v ./ora2mqtt.yml:/config/ora2mqtt.yml moryoav/ora2mqtt:latest
+ora2mqtt login -e mail@example.com -p secret [--code 1234] [--dry-run]
+ora2mqtt probe --path ../v2.0/userAuth/captcha/gen --method POST --body '{"captchaType":1}'
 ```
 
-# Data points
+Environment overrides: `GWM_H5_BASE` (base URL), `GWM_HEADER_<NAME>` (e.g.
+`GWM_HEADER_TERMINAL`, `GWM_HEADER_BRAND`), `GWM_EXTRA_HEADERS` (`name=value,name=value`) and
+`GWM_NO_CLIENT_CERT=1`.
 
-I can read the following data points:
+The signing scheme is documented in [V2_SIGN.md](V2_SIGN.md), the analysis that led to it —
+including what was ruled out — in [V2_FINDINGS.md](V2_FINDINGS.md) (partly German).
+`tools/gwm_v2_sign.py` is a standalone signer for poking at the API with curl.
 
-| Data point | Description
-| ---------- | ------------
-| 2011501    | Range in km
-| 2013021    | SOC
-| 2013022    | remaining charging time in minutes
-| 2013023    | 
-| 2041142    | Charging active
-| 2041301    | SOCE
-| 2042071    | 
-| 2042082    | bool flag, only active when charging (but not always)
-| 2078020    | 
-| 2101001    | Tire pressure front left in kPa
-| 2101002    | Tire pressure front right in kPa
-| 2101003    | Tire pressure rear left in kPa
-| 2101004    | Tire pressure rear right in kPa
-| 2101005    | Tire temperature front left in °C
-| 2101006    | Tire temperature front right in °C
-| 2101007    | Tire temperature rear left in °C
-| 2101008    | Tire temperature rear right in °C
-| 2102001    | 
-| 2102002    | 
-| 2102003    | 
-| 2102004    | 
-| 2102007    | 
-| 2102008    | 
-| 2102009    | 
-| 2102010    | 
-| 2103010    | Odometer in km
-| 2201001    | Interior temperature in tenths of °C
-| 2202001    | Air conditioning on
-| 2208001    | Lock open
-| 2210001    | Window closed front left
-| 2210002    | Window closed front right
-| 2210003    | Window closed rear left
-| 2210004    | Window closed rear right
-| 2210010    | 
-| 2210011    | 
-| 2210012    | 
-| 2210013    | 
-| 2222001    | 
-| 2310001    | 
+The GWM API details from the original project (endpoints, the obfuscated RSA keys in the app,
+certificate pinning) are described in the
+[upstream README](https://github.com/zivillian/ora2mqtt/blob/main/README.md); the
+deobfuscation code lives in [CertificateHandler.cs](libgwmapi/CertificateHandler.cs) and is
+still used for the bootstrap certificate.
 
-# How it started?
+## Contributing
 
-In evcc, [someone suggested](https://github.com/evcc-io/evcc/discussions/9524#discussioncomment-6832420) that we should take a look at the app...
-
-# How it's going...
-
-## Endpoints
-
-There are at least 4 API endpoints (for each region):
-
-### https://eu-h5-gateway.gwmcloud.com
-
-This is the standard endpoint for the app. Authentication takes place here, the user profile is managed, and there used to be a _Community_.
-
-### https://eu-app-gateway.gwmcloud.com
-
-Communication with the car takes place via this endpoint. This endpoint requires a client certificate from the GWM CA. Fortunately, the APP provides [one](#client-cert) that works.
-
-### https://eu-data-upload-gateway.gwmcloud.com
-
-The configuration for tracking is initially retrieved here, and then every click in the app is uploaded as gzipped JSON.
-
-### https://eu-app-gateway-common.gwmcloud.com
-
-So far, only one request is known, through which the app issues an individual certificate that is used to access the `eu-app-gateway` endpoint.
-
-## HTTP Headers
-
-Each request contains many non-standardized HTTP headers. Not all are needed, so here are only the relevant ones:
-
-|Name       |Value     |Description                                                          |
-|-----------|----------|----------------------------------------------------------------------|
-|Rs         |         2|                                                             required |
-|Terminal   |GW_APP_ORA|                                                             required |
-|Brand      |         3|                                                             required |
-|accessToken|       JWT|                                                   Result from login |
-|language   | de/en/...| affects error messages and must be set for some requests |
-|systemType |         1|                                                   sometimes required |
-|country    |        DE|             if the value changes, the accessToken becomes invalid |
-
-If the headers are missing, the API only returns an error. Sometimes it indicates which header is missing.
-
-## Cert pinning
-
-The root certificate for the `eu-app-gateway` endpoint is pinned in the app. For this, the app includes the Global Sign Root certificate as a resource (`res/raw/globalsign_chain.crt`). If this is replaced in the app (in version 1.8.1), the traffic can be intercepted with [mitmproxy](https://mitmproxy.org/).
-
-## Client Cert
-
-The `eu-app-gateway` endpoint requires a client certificate from the GWM CA. The app already contains a certificate. `assets/gwm_general.cer` contains the certificate, `assets/gwm_general.key` the corresponding private key, and `assets/gwm_root.pem` the certificate chain up to the GWM CA.
-
-Upon first login, the app issues its own certificate. The certificate is stored locally on the device and can be read if the `android:debuggable` flag is set.
-
-The certificate is stored in memory under `files/pki/cert/cert`, along with the files `files/pkey_data11`, `files/pkey_data21`, and `files/pkey_data31`. The `1` stands for the n-th certificate (because it eventually expires and needs to be renewed). The supplied key is stored in the file `files/pkey_data30`.
-
-### pkey_data1x
-
-This is the Public Key.
-
-### pkey_data2x
-
-This is also the Public Key, but the RSA parameter e has been _transformed_.
-
-### pkey_data3x
-
-This is the Private Key - the RSA parameter d has been _transformed_.
-
-### _Transformation_
-
-Both the supplied keys and the keys of the created client certificate are _transformed_. Additionally, only the RSA parameters n, d, and e are stored - the other parameters p, q, dp, dq, and qInv must be calculated. The code to reverse the transformation and calculate the missing parameters is in [CertificateHandler.cs](libgwmapi/CertificateHandler.cs).
-
-Alternatively, this can also be done in Python with [cryptography.hazmat.primitives.asymmetric.rsa](https://cryptography.io/en/latest/hazmat/primitives/asymmetric/rsa/#handling-partial-rsa-private-keys).
-
-# How to...?
-
-I disassembled and reassembled the app with [apktool](https://apktool.org/). This allows the certificates to be read and replaced. To understand what's in the certificates and what is _transformed_ and how, [asn1js](https://lapo.it/asn1js) was very helpful.
-
-To be able to install the modified app, it must be signed - this is relatively easy with [uber-apk-signer](https://github.com/patrickfav/uber-apk-signer/).
-
-The traffic can be monitored with [mitmproxy](https://mitmproxy.org/). The root certificate must be [installed](https://docs.mitmproxy.org/stable/concepts-certificates/#installing-the-mitmproxy-ca-certificate-manually) on the device or emulator, and the client certificate from the app must be [extracted](#client-cert), [_transformed_](#transformation), and [specified](https://docs.mitmproxy.org/stable/concepts-certificates/#using-a-client-side-certificate).
-
-The app includes some native binaries (relevant are `libbean.so` and `libbeancrypto.so`) - certificates and private keys are also processed there. However, this can be investigated very well with [Ghidra](https://ghidra-sre.org/). For the crypto part, [libtomcrypt](https://github.com/libtom/libtomcrypt/) is used - which also allows understanding the _transformation_ of the RSA parameters.
+Issues and pull requests are welcome: [open an issue](https://github.com/Oponn4/ora2mqtt/issues/new).
