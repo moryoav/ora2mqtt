@@ -557,6 +557,11 @@ public class RunCommand:BaseCommand
             _logger.LogInformation("Client certificate expires {NotAfter:u}, renewing", notAfter);
         }
 
+        //throttle every attempt, not just the failures: if GWM ever hands out a certificate
+        //that lives shorter than the renewal leeway, the renewal condition stays true and this
+        //would otherwise call applyCertificate on every single interval
+        _nextCertificateAttemptUtc = DateTime.UtcNow.Add(CertificateRetryInterval);
+
         //EnrollCertificateAsync is a no-op while a certificate is stored, so the old one is
         //cleared for the attempt - and put back when it fails, otherwise the next config write
         //would persist the loss of a still valid certificate
@@ -577,10 +582,9 @@ public class RunCommand:BaseCommand
         {
             config.Account.ClientCertificate = previousCertificate;
             config.Account.ClientCertificateKey = previousKey;
-            _logger.LogWarning("Certificate enrollment failed: {Message}", e.Message);
-            //keep publishing with the old certificate while it is still accepted, and do not
-            //retry applyCertificate on every interval
-            _nextCertificateAttemptUtc = DateTime.UtcNow.Add(CertificateRetryInterval);
+            //keep publishing with the old certificate while it is still accepted
+            _logger.LogWarning("Certificate enrollment failed, retrying in {Retry}: {Message}",
+                CertificateRetryInterval, e.Message);
             return api;
         }
     }
