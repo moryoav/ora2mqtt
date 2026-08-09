@@ -12,6 +12,11 @@
   allein also **nicht** belegen — was am 04.08. wirklich fehlte, war die Signatur.
 - **JWT**: `exp` in Sekunden, `iat + 86400` → Access-Token lebt **24 h**. Damit lässt sich
   der Ablauf lokal prüfen, statt vor jedem Zyklus einen API-Call zu verbrennen.
+- **`appId` wird nicht validiert.** `1` (unser Wert), `6` (von moryoav/culmseehousehold
+  berichtet) und `999` liefern bei authentifizierten Reads identisch 12× HTTP 200, keine
+  Fehler. Gegenprobe, dass der Header-Override überhaupt wirkt: `brand=3` →
+  `551008 Illegal terminal, brand or enterpriseId`. `terminal`/`brand` sind also hart
+  geprüft, `appId` nicht. (Login und Enrollment nicht mitgetestet.)
 - **`appAuth/applyCertificate` darf mehrfach laufen.** Sieben Enrollments an einem Tag,
   das jeweils vorherige Zertifikat blieb weiter gültig (die Produktivinstanz lief mit dem
   alten unverändert durch). Laufzeit je Zertifikat: **1 Jahr**.
