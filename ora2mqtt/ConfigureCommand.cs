@@ -90,12 +90,13 @@ namespace ora2mqtt
                     AccessToken = options.Account.AccessToken,
                     RefreshToken = options.Account.RefreshToken,
                 };
-                client.SetAccessToken("");
+                //the expired accessToken header stays on the request, see RunCommand
                 try
                 {
                     var response = await client.RefreshTokenAsync(refresh, cancellationToken);
                     options.Account.AccessToken = response.AccessToken;
                     options.Account.RefreshToken = response.RefreshToken;
+                    client.SetAccessToken(response.AccessToken);
                     return;
                 }
                 catch (GwmApiException e)

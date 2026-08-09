@@ -38,8 +38,10 @@ public partial class GwmApiClient
 
     public Task<RefreshTokenResponse> RefreshTokenAsync(RefreshTokenRequest request, CancellationToken cancellationToken)
     {
-        // v2: refreshToken works again once requests are signed
-        return PostH5V2Async<RefreshTokenRequest, RefreshTokenResponse>("userAuth/refreshToken", request, cancellationToken);
+        // refreshToken stayed on v1.0 when the rest of auth moved to v2 - v2.0 answers 404.
+        // It needs the signed headers (handled by GwmSigningHandler) and the expired
+        // accessToken header alongside the body.
+        return PostH5Async<RefreshTokenRequest, RefreshTokenResponse>("userAuth/refreshToken", request, cancellationToken);
     }
 
     // --- v2 (My GWM) auth ---

@@ -495,19 +495,9 @@ public class RunCommand:BaseCommand
             AccessToken = options.Account.AccessToken,
             RefreshToken = options.Account.RefreshToken,
         };
-        client.SetAccessToken("");
-        RefreshTokenResponse response;
-        try
-        {
-            response = await client.RefreshTokenAsync(refresh, cancellationToken);
-        }
-        catch
-        {
-            //put the old token back - otherwise every following cycle fails with
-            //"Empty accessToken" and forces another refresh, even if the token still works
-            client.SetAccessToken(options.Account.AccessToken);
-            throw;
-        }
+        //keep the expired accessToken header on the request - the v1.0 refresh endpoint
+        //expects it next to the body, and dropping it fails with "Empty accessToken"
+        var response = await client.RefreshTokenAsync(refresh, cancellationToken);
         options.Account.AccessToken = response.AccessToken;
         options.Account.RefreshToken = response.RefreshToken;
         await SaveConfigAsync(options, cancellationToken);
