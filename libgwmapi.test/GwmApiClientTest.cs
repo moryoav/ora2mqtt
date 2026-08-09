@@ -27,59 +27,9 @@ public class GwmApiClientTest
         Assert.Contains(countries.G, x => x.CountryName == "Germany");
     }
 
-    [Fact]
-    public async Task CanGetCustomerServicePhone()
-    {
-        var client = GetClient();
-        var customerServicePhone = await client.GetCustomerServicePhoneAsync("DE", CancellationToken.None);
-        Assert.NotNull(customerServicePhone);
-        Assert.Equal("08009886044", customerServicePhone.Phone);
-    }
 
-    [Fact]
-    public async Task CanLoginAccount()
-    {
-        var client = GetClient();
-        var request = new LoginAccountRequest
-        {
-            Account = "ora@example.com",
-            Country = "DE",
-            IsEncrypt = false,
-            DeviceId = "<known device id>",
-            Model = "ora2mqtt",
-            Password = "<password>"
-        };
-        var response = await client.LoginAccountAsync(request, CancellationToken.None);
-        Assert.NotNull(response);
-        Assert.NotNull(response.AccessToken);
-        _testOutputHelper.WriteLine(System.Text.Json.JsonSerializer.Serialize(response));
-    }
 
-    [Fact]
-    public async Task CanGetSmsCode()
-    {
-        var client = GetClient();
-        var request = new GetSmsCode { Email = "ora@example.com" };
-        await client.GetSmsCodeAsync(request, CancellationToken.None);
-    }
 
-    [Fact]
-    public async Task CanLoginWithSms()
-    {
-        var client = GetClient();
-        var request = new LoginWithSmsRequest
-        {
-            Email = "ora@example.com",
-            Country = "DE",
-            DeviceId = "8453F1C6-29E9-421C-8C28-7E860C94527D",
-            Model = "ora2mqtt",
-            SmsCode = "<code>"
-        };
-        var response = await client.LoginWithSmsAsync(request, CancellationToken.None);
-        Assert.NotNull(response);
-        Assert.NotNull(response.AccessToken);
-        _testOutputHelper.WriteLine(JsonSerializer.Serialize(response));
-    }
 
     [Fact]
     public async Task CanGetUserBaseInfo()
@@ -215,16 +165,6 @@ public class GwmApiClientTest
         Assert.NotNull(first.HwCommandId);
     }
 
-    [Fact]
-    public async Task CanAddAppDeviceInfo()
-    {
-        var client = GetClient();
-        var request = new AddAppDevice
-        {
-            DeviceId = Guid.NewGuid().ToString("N")
-        };
-        await client.AddAppDeviceInfoAsync(request, CancellationToken.None);
-    }
 
     [Fact]
     public async Task CanRefreshToken()

@@ -1,4 +1,5 @@
 ﻿using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using CommandLine;
 using libgwmapi;
@@ -24,10 +25,21 @@ public class RunCommand:BaseCommand
     private const int RemoteCommandResultMaxPolls = 18;
     private const int RemoteCommandStatusMaxLength = 240;
     private static readonly TimeSpan RemoteCommandResultPollInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan DiscoveryRepublishInterval = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxFailureBackoff = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan TokenRefreshLeeway = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan CertificateRenewalLeeway = TimeSpan.FromDays(30);
+    private static readonly TimeSpan CertificateRetryInterval = TimeSpan.FromHours(6);
 
     private ILogger _logger;
     private readonly Dictionary<string, AcSettings> _acSettings = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _lastRemoteCommandStatuses = new(StringComparer.OrdinalIgnoreCase);
+    private volatile bool _discoveryPublishRequested = true;
+    private DateTime _lastDiscoveryPublishUtc = DateTime.MinValue;
+    private bool _verifyTokenWithApi;
+    private DateTime? _clientCertificateNotAfter;
+    private DateTime _nextCertificateAttemptUtc = DateTime.MinValue;
 
     [Option('i', "interval", Default = 10, HelpText = "GWM API polling interval")]
     public int Intervall { get; set; }
@@ -51,29 +63,98 @@ public class RunCommand:BaseCommand
         }
 
         var api = GetGwmApiClient(config);
+
+        // enroll the mTLS client certificate on first run, then rebuild the client so the
+        // app-gateway calls use it
+        api = await EnsureClientCertificateAsync(api, config, cancellationToken);
+
         using var mqtt = await ConnectMqttAsync(config, api, cancellationToken);
 
-        var publishHaDiscovery = config.Mqtt.HomeAssistantDiscoveryTopic is not null;
+        var discoveryEnabled = config.Mqtt.HomeAssistantDiscoveryTopic is not null;
+        _logger.LogInformation("Starting run loop. Interval={Interval}s, HA-Discovery={Enabled}, DiscoveryRepublishInterval={Republish}",
+            Intervall, discoveryEnabled, DiscoveryRepublishInterval);
 
-        try
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Intervall));
+        var consecutiveFailures = 0;
+        while (!cancellationToken.IsCancellationRequested)
         {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Intervall));
-            while (!cancellationToken.IsCancellationRequested)
+            try
             {
                 await RefreshTokenAsync(api, config, cancellationToken);
-                await PublishStatusAsync(mqtt, api, config.Mqtt, publishHaDiscovery, cancellationToken);
-                if (publishHaDiscovery)
+                api = await EnsureClientCertificateAsync(api, config, cancellationToken);
+                var shouldPublishDiscovery = discoveryEnabled && ShouldPublishDiscoveryNow();
+                if (shouldPublishDiscovery)
                 {
-                    publishHaDiscovery = false;
+                    _logger.LogInformation("Publishing HA discovery (requested={Requested}, ageSinceLastPublish={Age})",
+                        _discoveryPublishRequested,
+                        _lastDiscoveryPublishUtc == DateTime.MinValue ? "never" : (DateTime.UtcNow - _lastDiscoveryPublishUtc).ToString());
                 }
+                await PublishStatusAsync(mqtt, api, config.Mqtt, shouldPublishDiscovery, cancellationToken);
+                if (shouldPublishDiscovery)
+                {
+                    _lastDiscoveryPublishUtc = DateTime.UtcNow;
+                    _discoveryPublishRequested = false;
+                }
+                if (consecutiveFailures > 0)
+                {
+                    _logger.LogInformation("Recovered after {Count} consecutive failures", consecutiveFailures);
+                    consecutiveFailures = 0;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                consecutiveFailures++;
+                //the cached token expiry may be wrong (revoked server-side, clock skew) -
+                //ask the API again on the next cycle instead of trusting the JWT
+                _verifyTokenWithApi = true;
+                var backoff = GetFailureBackoff(consecutiveFailures);
+                _logger.LogWarning(ex,
+                    "Cycle failed (#{Count} consecutive). Sleeping {Backoff} and retrying. " +
+                    "Common causes: transient GWM-cloud 5xx, network blip, MQTT publish error",
+                    consecutiveFailures, backoff);
+                try
+                {
+                    //back off instead of hammering the API on every interval - a dead
+                    //refresh token would otherwise produce thousands of requests per day
+                    await Task.Delay(backoff, cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                continue;
+            }
+            try
+            {
                 await timer.WaitForNextTickAsync(cancellationToken);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
-        catch (TaskCanceledException)
-        {
-            //ignore
-        }
+        _logger.LogInformation("Run loop stopped");
         return 0;
+    }
+
+    private TimeSpan GetFailureBackoff(int consecutiveFailures)
+    {
+        var exponent = Math.Min(consecutiveFailures - 1, 16);
+        var seconds = Intervall * Math.Pow(2, exponent);
+        return seconds >= MaxFailureBackoff.TotalSeconds
+            ? MaxFailureBackoff
+            : TimeSpan.FromSeconds(seconds);
+    }
+
+    private bool ShouldPublishDiscoveryNow()
+    {
+        if (_discoveryPublishRequested) return true;
+        if (_lastDiscoveryPublishUtc == DateTime.MinValue) return true;
+        return (DateTime.UtcNow - _lastDiscoveryPublishUtc) >= DiscoveryRepublishInterval;
     }
 
     private async Task<IMqttClient> ConnectMqttAsync(Ora2MqttOptions config, GwmApiClient api, CancellationToken cancellationToken)
@@ -83,28 +164,77 @@ public class RunCommand:BaseCommand
         var client = factory.CreateMqttClient();
         var builder = new MqttClientOptionsBuilder()
             .WithTcpServer(options.Host)
-            .WithTlsOptions(new MqttClientTlsOptions { UseTls = options.UseTls });
+            .WithTlsOptions(new MqttClientTlsOptions { UseTls = options.UseTls })
+            .WithCleanSession(true);
         if (!String.IsNullOrEmpty(options.Username) && !String.IsNullOrEmpty(options.Password))
         {
             builder = builder.WithCredentials(options.Username, options.Password);
         }
 
+        // Re-subscribe on every (re)connect — MQTT CleanSession=true loses subscriptions on disconnect.
+        client.ConnectedAsync += async e =>
+        {
+            _logger.LogInformation("MQTT connected to {Host} (resultCode={Result})", options.Host, e.ConnectResult.ResultCode);
+            try
+            {
+                if (options.HomeAssistantDiscoveryTopic is not null)
+                {
+                    var statusTopic = $"{options.HomeAssistantDiscoveryTopic}/status";
+                    await client.SubscribeAsync(statusTopic, cancellationToken: cancellationToken);
+                    _logger.LogInformation("Subscribed to {Topic} (HA birth/LWT)", statusTopic);
+                }
+                await client.SubscribeAsync("GWM/+/command/#", cancellationToken: cancellationToken);
+                _logger.LogInformation("Subscribed to GWM/+/command/#");
+
+                // Trigger discovery republish on (re)connect — broker may have dropped retained state.
+                _discoveryPublishRequested = true;
+                _logger.LogInformation("Discovery republish requested due to (re)connect");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to re-subscribe after connect");
+            }
+        };
+
         client.DisconnectedAsync += async e =>
         {
-            if (e.ClientWasConnected)
+            _logger.LogWarning("MQTT disconnected. Reason={Reason}, WasConnected={WasConnected}, Exception={Exception}",
+                e.Reason, e.ClientWasConnected, e.Exception?.Message ?? "none");
+            if (!e.ClientWasConnected || cancellationToken.IsCancellationRequested)
             {
-                await client.ConnectAsync(client.Options, cancellationToken);
+                return;
+            }
+            // Persistent retry — DisconnectedAsync fires only ONCE per drop; if the
+            // single ConnectAsync below fails, no new disconnect event will trigger
+            // another attempt. So loop here until we reconnect or get cancelled.
+            var attempt = 0;
+            while (!cancellationToken.IsCancellationRequested && !client.IsConnected)
+            {
+                attempt++;
+                try
+                {
+                    await Task.Delay(ReconnectDelay, cancellationToken);
+                    _logger.LogInformation("MQTT reconnect attempt {Attempt} to {Host}", attempt, options.Host);
+                    await client.ConnectAsync(client.Options, cancellationToken);
+                    break;
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("MQTT reconnect attempt {Attempt} failed: {Message} — retrying in {Delay}s",
+                        attempt, ex.Message, ReconnectDelay.TotalSeconds);
+                }
             }
         };
 
         client.ApplicationMessageReceivedAsync += x => OnMessageAsync(x, client, api, config, cancellationToken);
+
+        _logger.LogInformation("Connecting to MQTT {Host} (TLS={Tls}, User={User})",
+            options.Host, options.UseTls, string.IsNullOrEmpty(options.Username) ? "<none>" : options.Username);
         await client.ConnectAsync(builder.Build(), cancellationToken);
-        if (options.HomeAssistantDiscoveryTopic is not null)
-        {
-            await client.SubscribeAsync($"{options.HomeAssistantDiscoveryTopic}/status", cancellationToken: cancellationToken);
-        }
-        // Subscribe to remote command topics.
-        await client.SubscribeAsync("GWM/+/command/#", cancellationToken: cancellationToken);
         return client;
     }
 
@@ -114,7 +244,16 @@ public class RunCommand:BaseCommand
         if (options.HomeAssistantDiscoveryTopic is not null &&
             arg.ApplicationMessage.Topic == $"{options.HomeAssistantDiscoveryTopic}/status")
         {
-            await PublishStatusAsync(mqtt, api, options, true, cancellationToken);
+            var birthPayload = Encoding.UTF8.GetString(arg.ApplicationMessage.Payload.FirstSpan).Trim();
+            if (string.Equals(birthPayload, "online", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogInformation("HA birth message received (payload=online) — requesting discovery republish on next tick");
+                _discoveryPublishRequested = true;
+            }
+            else
+            {
+                _logger.LogInformation("HA status message received (payload={Payload}) — ignored", birthPayload);
+            }
             return;
         }
 
@@ -336,15 +475,28 @@ public class RunCommand:BaseCommand
 
     private async Task RefreshTokenAsync(GwmApiClient client, Ora2MqttOptions options, CancellationToken cancellationToken)
     {
-        try
+        //the JWT carries its own expiry (exp, in seconds - 24h lifetime), so the token can be
+        //checked locally. Probing the API every cycle cost one request per interval, which is
+        //~8600 pointless requests a day at the default 10s.
+        var expiry = TokenExpiry(options.Account.AccessToken);
+        if (!_verifyTokenWithApi && expiry is { } valid)
         {
-            //check token
-            await client.GetUserBaseInfoAsync(cancellationToken);
-            return;
+            if (valid - DateTimeOffset.UtcNow > TokenRefreshLeeway) return;
+            _logger.LogInformation("Access token expires {Expiry:u}, refreshing", valid);
         }
-        catch (GwmApiException e)
+        else
         {
-            _logger.LogError($"Access token expired ({e.Message}). Trying to refresh token...");
+            //no readable expiry, or the last cycle failed - let the API decide
+            try
+            {
+                await client.GetUserBaseInfoAsync(cancellationToken);
+                _verifyTokenWithApi = false;
+                return;
+            }
+            catch (GwmApiException e)
+            {
+                _logger.LogError($"Access token rejected ({e.Message}). Trying to refresh token...");
+            }
         }
 
         var refresh = new RefreshTokenRequest
@@ -353,12 +505,88 @@ public class RunCommand:BaseCommand
             AccessToken = options.Account.AccessToken,
             RefreshToken = options.Account.RefreshToken,
         };
-        client.SetAccessToken("");
+        //keep the expired accessToken header on the request - the v1.0 refresh endpoint
+        //expects it next to the body, and dropping it fails with "Empty accessToken"
         var response = await client.RefreshTokenAsync(refresh, cancellationToken);
         options.Account.AccessToken = response.AccessToken;
         options.Account.RefreshToken = response.RefreshToken;
         await SaveConfigAsync(options, cancellationToken);
         client.SetAccessToken(options.Account.AccessToken);
+        _verifyTokenWithApi = false;
+        _logger.LogInformation("Access token refreshed, valid until {Expiry:u}",
+            TokenExpiry(options.Account.AccessToken));
+    }
+
+    //JWT payload -> exp claim. Returns null when the token is not a readable JWT, in which
+    //case the caller falls back to asking the API.
+    private static DateTimeOffset? TokenExpiry(string accessToken)
+    {
+        if (String.IsNullOrEmpty(accessToken)) return null;
+        var parts = accessToken.Split('.');
+        if (parts.Length < 2) return null;
+        try
+        {
+            var payload = parts[1].Replace('-', '+').Replace('_', '/');
+            payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
+            using var document = JsonDocument.Parse(Convert.FromBase64String(payload));
+            if (!document.RootElement.TryGetProperty("exp", out var exp)) return null;
+            if (!exp.TryGetInt64(out var seconds)) return null;
+            return DateTimeOffset.FromUnixTimeSeconds(seconds);
+        }
+        catch (Exception e) when (e is FormatException or JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Enrolls the mTLS client certificate when there is none, and renews it before it expires
+    /// - the enrolled certificate is only valid for a year, and the container runs for months.
+    /// Returns the client to keep using (rebuilt when a new certificate was enrolled).
+    /// </summary>
+    private async Task<GwmApiClient> EnsureClientCertificateAsync(GwmApiClient api, Ora2MqttOptions config, CancellationToken cancellationToken)
+    {
+        var hasCertificate = !String.IsNullOrEmpty(config.Account.ClientCertificate);
+        if (hasCertificate)
+        {
+            _clientCertificateNotAfter ??= CertificateEnrollment.NotAfterUtc(config.Account.ClientCertificate);
+            //unreadable expiry: leave it alone, the gateway is the authority on whether it works
+            if (_clientCertificateNotAfter is not { } notAfter) return api;
+            if (notAfter - DateTime.UtcNow > CertificateRenewalLeeway) return api;
+            if (DateTime.UtcNow < _nextCertificateAttemptUtc) return api;
+            _logger.LogInformation("Client certificate expires {NotAfter:u}, renewing", notAfter);
+        }
+
+        //throttle every attempt, not just the failures: if GWM ever hands out a certificate
+        //that lives shorter than the renewal leeway, the renewal condition stays true and this
+        //would otherwise call applyCertificate on every single interval
+        _nextCertificateAttemptUtc = DateTime.UtcNow.Add(CertificateRetryInterval);
+
+        //EnrollCertificateAsync is a no-op while a certificate is stored, so the old one is
+        //cleared for the attempt - and put back when it fails, otherwise the next config write
+        //would persist the loss of a still valid certificate
+        var previousCertificate = config.Account.ClientCertificate;
+        var previousKey = config.Account.ClientCertificateKey;
+        config.Account.ClientCertificate = null;
+        config.Account.ClientCertificateKey = null;
+        try
+        {
+            await EnrollCertificateAsync(api, config, cancellationToken);
+            await SaveConfigAsync(config, cancellationToken);
+            _clientCertificateNotAfter = CertificateEnrollment.NotAfterUtc(config.Account.ClientCertificate);
+            _logger.LogInformation("Enrolled mTLS client certificate, valid until {NotAfter:u}",
+                _clientCertificateNotAfter);
+            return GetGwmApiClient(config);
+        }
+        catch (GwmApiException e)
+        {
+            config.Account.ClientCertificate = previousCertificate;
+            config.Account.ClientCertificateKey = previousKey;
+            //keep publishing with the old certificate while it is still accepted
+            _logger.LogWarning("Certificate enrollment failed, retrying in {Retry}: {Message}",
+                CertificateRetryInterval, e.Message);
+            return api;
+        }
     }
 
     private async Task PublishStatusAsync(IMqttClient mqtt, GwmApiClient gwm, Ora2MqttMqttOptions options, bool publishHaDiscovery, CancellationToken cancellationToken)
@@ -749,7 +977,10 @@ public class RunCommand:BaseCommand
                 },
             }
         });
-        return PublishMessageAsync(mqtt, $"{options.HomeAssistantDiscoveryTopic}/device/{vehicle.Vin}/config", json, cancellationToken);
+        var topic = $"{options.HomeAssistantDiscoveryTopic}/device/{vehicle.Vin}/config";
+        _logger.LogInformation("Publishing HA discovery (retain=true) for VIN {Vin} to {Topic} ({Bytes} bytes)",
+            vehicle.Vin, topic, json.Length);
+        return PublishMessageAsync(mqtt, topic, json, cancellationToken, retain: true);
     }
 
     private Task PublishLastRemoteCommandStatusAsync(IMqttClient mqtt, string vin, CancellationToken cancellationToken)
@@ -795,11 +1026,12 @@ public class RunCommand:BaseCommand
         return PublishMessageAsync(client, topic, payload.ToString(CultureInfo.InvariantCulture), cancellationToken);
     }
 
-    private Task PublishMessageAsync(IMqttClient client, string topic, string payload, CancellationToken cancellationToken)
+    private Task PublishMessageAsync(IMqttClient client, string topic, string payload, CancellationToken cancellationToken, bool retain = false)
     {
         var message = new MqttApplicationMessageBuilder()
             .WithTopic(topic)
             .WithPayload(payload)
+            .WithRetainFlag(retain)
             .Build();
         return client.PublishAsync(message, cancellationToken);
     }

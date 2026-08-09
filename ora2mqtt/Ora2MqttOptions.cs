@@ -22,6 +22,11 @@ public class Ora2MqttAccountOptions
     public string BeanId { get; set; }
 
     public string SecurityPin { get; set; }
+
+    // enrolled client certificate for the mTLS app-gateway (base64 DER + base64 PKCS8 key)
+    public string ClientCertificate { get; set; }
+
+    public string ClientCertificateKey { get; set; }
 }
 
 public class Ora2MqttMqttOptions

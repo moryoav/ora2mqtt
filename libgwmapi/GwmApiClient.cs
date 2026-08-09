@@ -11,40 +11,107 @@ public partial class GwmApiClient
     public static readonly string AppHttpClientName = "eu-app-gateway";
     private readonly HttpClient _h5Client;
     private readonly HttpClient _appClient;
+    private readonly HttpClient _certificateClient;
+    private readonly Uri _h5V2Base;
     private readonly ILogger<GwmApiClient> _logger;
 
-    public GwmApiClient(IHttpClientFactory factory, ILoggerFactory loggerFactory)
-        : this(factory.CreateClient(H5HttpClientName), factory.CreateClient(AppHttpClientName), loggerFactory)
+    // My GWM app identity (v2). terminal/brand pair is validated by the backend
+    // (mismatch -> 551008). appId 1 / enterpriseId CC01 / secVersion 2.0 as sent by the app.
+    private static void AddIdentityHeaders(HttpClient client)
     {
+        void Set(string name, string fallback)
+        {
+            client.DefaultRequestHeaders.Remove(name);
+            client.DefaultRequestHeaders.Add(name, Header(name, fallback));
+        }
+        Set("rs", "2");
+        Set("terminal", "GW_APP_GWM");
+        Set("brand", "6");
+        Set("appId", "1");
+        Set("enterpriseId", "CC01");
+        Set("channel", "APP");
+        Set("cVer", "1.3.0");
+        Set("secVersion", "2.0");
+        Set("systemType", "1");
     }
 
     public GwmApiClient(HttpClient h5Client, HttpClient appClient, ILoggerFactory loggerFactory)
+        : this(h5Client, appClient, null, loggerFactory)
+    {
+    }
+
+    public GwmApiClient(HttpClient h5Client, HttpClient appClient, HttpClient certificateClient, ILoggerFactory loggerFactory)
     {
         _logger = loggerFactory.CreateLogger<GwmApiClient>();
         _h5Client = h5Client;
-        _h5Client.DefaultRequestHeaders.Add("rs", "2");
-        _h5Client.DefaultRequestHeaders.Add("terminal", "GW_APP_ORA");
-        _h5Client.DefaultRequestHeaders.Add("brand", "3");
-        _h5Client.DefaultRequestHeaders.Add("language", "en");
-        _h5Client.DefaultRequestHeaders.Add("systemType", "1");
-        _h5Client.DefaultRequestHeaders.Add("cver", "");
-        _h5Client.BaseAddress = new Uri("https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
-        
+        AddIdentityHeaders(_h5Client);
+        _h5Client.DefaultRequestHeaders.Add("language", Header("language", "en"));
+        _h5Client.BaseAddress = new Uri(Environment.GetEnvironmentVariable("GWM_H5_BASE")
+            ?? "https://eu-h5-gateway.gwmcloud.com/app-api/api/v1.0/");
+        _h5V2Base = new Uri("https://eu-h5-gateway.gwmcloud.com/app-api/api/v2.0/");
+
         _appClient = appClient;
-        _appClient.DefaultRequestHeaders.Add("rs", "2");
-        _appClient.DefaultRequestHeaders.Add("terminal", "GW_APP_ORA");
-        _appClient.DefaultRequestHeaders.Add("brand", "3");
+        AddIdentityHeaders(_appClient);
         _appClient.BaseAddress = new Uri("https://eu-app-gateway.gwmcloud.com/app-api/api/v1.0/");
+
+        // applyCertificate lives on the common app-gateway and uses the bootstrap cert
+        _certificateClient = certificateClient ?? appClient;
+        if (!ReferenceEquals(_certificateClient, _appClient))
+        {
+            AddIdentityHeaders(_certificateClient);
+            _certificateClient.BaseAddress = new Uri("https://eu-app-gateway-common.gwmcloud.com/app-api/api/v1.0/");
+        }
+
+        AddExtraHeaders(_h5Client);
+        AddExtraHeaders(_appClient);
+        LogHeaders();
+    }
+
+    //allows probing which client identity the GWM backend still accepts,
+    //e.g. GWM_HEADER_TERMINAL=GW_APP_GWM GWM_HEADER_BRAND=6
+    private static string Header(string name, string fallback)
+    {
+        return Environment.GetEnvironmentVariable($"GWM_HEADER_{name.ToUpperInvariant()}") ?? fallback;
+    }
+
+    //GWM_EXTRA_HEADERS="enterpriseId=1,sign=deadbeef" - probe headers we do not send yet
+    private static void AddExtraHeaders(HttpClient client)
+    {
+        var extra = Environment.GetEnvironmentVariable("GWM_EXTRA_HEADERS");
+        if (String.IsNullOrWhiteSpace(extra)) return;
+        foreach (var pair in extra.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = pair.IndexOf('=');
+            if (separator <= 0) continue;
+            var name = pair[..separator].Trim();
+            client.DefaultRequestHeaders.Remove(name);
+            client.DefaultRequestHeaders.Add(name, pair[(separator + 1)..]);
+        }
+    }
+
+    private void LogHeaders()
+    {
+        _logger.LogInformation("GWM client identity: terminal={Terminal} brand={Brand} rs={Rs} systemType={SystemType} cver='{Cver}'",
+            _h5Client.DefaultRequestHeaders.GetValues("terminal").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("brand").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("rs").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("systemType").First(),
+            _h5Client.DefaultRequestHeaders.GetValues("cVer").First());
+    }
+
+    private void SetOnBoth(string name, string value)
+    {
+        foreach (var client in new[] { _h5Client, _appClient, _certificateClient }.Distinct())
+        {
+            client.DefaultRequestHeaders.Remove(name);
+            if (value is not null) client.DefaultRequestHeaders.Add(name, value);
+        }
     }
 
     public string Language
     {
         get => _h5Client.DefaultRequestHeaders.GetValues("language").FirstOrDefault();
-        set
-        {
-            _h5Client.DefaultRequestHeaders.Remove("language");
-            _h5Client.DefaultRequestHeaders.Add("language", value);
-        }
+        set => SetOnBoth("language", value);
     }
 
     public string Country
@@ -52,11 +119,16 @@ public partial class GwmApiClient
         get => _h5Client.DefaultRequestHeaders.GetValues("country").FirstOrDefault();
         set
         {
-            _h5Client.DefaultRequestHeaders.Remove("country");
-            _h5Client.DefaultRequestHeaders.Add("country", value);
-            _appClient.DefaultRequestHeaders.Remove("country");
-            _appClient.DefaultRequestHeaders.Add("country", value);
+            SetOnBoth("country", value);
+            //the app sends regionCode next to country (both "DE" for Germany)
+            SetOnBoth("regionCode", value);
         }
+    }
+
+    // the app sends the deviceId header on every request
+    public string DeviceId
+    {
+        set => SetOnBoth("deviceId", value);
     }
 
     public bool HasAccessToken
@@ -71,11 +143,39 @@ public partial class GwmApiClient
 
     public void SetAccessToken(string accessToken)
     {
-        _h5Client.DefaultRequestHeaders.Remove("accessToken");
-        _h5Client.DefaultRequestHeaders.Add("accessToken", accessToken);
+        SetOnBoth("accessToken", accessToken);
+    }
 
-        _appClient.DefaultRequestHeaders.Remove("accessToken");
-        _appClient.DefaultRequestHeaders.Add("accessToken", accessToken);
+    // applyCertificate expects a per-enrollment deviceId (and matching iccid) on the cert client
+    public void SetCertificateDeviceId(string value)
+    {
+        _certificateClient.DefaultRequestHeaders.Remove("deviceId");
+        _certificateClient.DefaultRequestHeaders.Add("deviceId", value);
+        _certificateClient.DefaultRequestHeaders.Remove("iccid");
+        _certificateClient.DefaultRequestHeaders.Add("iccid", value);
+    }
+
+    public async Task<DTO.AppAuth.ApplyCertificateResponse> ApplyCertificateAsync(
+        DTO.AppAuth.ApplyCertificateRequest request, CancellationToken cancellationToken)
+    {
+        var response = await _certificateClient.PostAsJsonAsync("appAuth/applyCertificate", request, cancellationToken);
+        return await GetResponseAsync<DTO.AppAuth.ApplyCertificateResponse>(response, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends a raw request and returns the unparsed response, for exploring
+    /// endpoints whose request and response shapes are not known yet.
+    /// </summary>
+    public async Task<string> SendRawAsync(string method, string path, string body, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+        }
+        using var response = await _h5Client.SendAsync(request, cancellationToken);
+        var content = await response.Content.ReadAsStringAsync(cancellationToken);
+        return $"{(int)response.StatusCode} {request.RequestUri}\n{content}";
     }
 
     private async Task PostH5Async<T>(string url, T body, CancellationToken cancellationToken)
@@ -94,6 +194,20 @@ public partial class GwmApiClient
     {
         var response = await _h5Client.PostAsJsonAsync(url, body, cancellationToken);
         return await GetResponseAsync<TOut>(response, cancellationToken);
+    }
+
+    // v2 auth endpoints live under /app-api/api/v2.0/ on the same h5 host; posting to an
+    // absolute uri overrides the client's v1.0 base while keeping identity headers + signing.
+    private async Task<TOut> PostH5V2Async<TIn, TOut>(string path, TIn body, CancellationToken cancellationToken)
+    {
+        var response = await _h5Client.PostAsJsonAsync(new Uri(_h5V2Base, path), body, cancellationToken);
+        return await GetResponseAsync<TOut>(response, cancellationToken);
+    }
+
+    private async Task PostH5V2Async<TIn>(string path, TIn body, CancellationToken cancellationToken)
+    {
+        var response = await _h5Client.PostAsJsonAsync(new Uri(_h5V2Base, path), body, cancellationToken);
+        await CheckResponseAsync(response, cancellationToken);
     }
 
     private async Task<T> GetH5Async<T>(string url, CancellationToken cancellationToken)
@@ -135,27 +249,41 @@ public partial class GwmApiClient
         }
         catch (JsonException) when (!response.IsSuccessStatusCode)
         {
-            response.EnsureSuccessStatusCode();
-            throw;
+            //not a GWM error body at all - report the status and what came back instead,
+            //otherwise a wrong API version looks like an empty, unexplained failure
+            throw HttpFailure(response, content);
         }
 
         if (result is null)
         {
-            response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode) throw HttpFailure(response, content);
             throw new JsonException("GWM response body was empty.");
         }
 
-        CheckResponse(result);
-        response.EnsureSuccessStatusCode();
+        CheckResponse(result, response);
+        if (!response.IsSuccessStatusCode) throw HttpFailure(response, content);
         return result;
     }
 
-    private void CheckResponse(GwmResponse response)
+    private static GwmApiException HttpFailure(HttpResponseMessage response, string content)
     {
-        if (response.Code != "000000")
-        {
-            throw new GwmApiException(response.Code, response.Description);
-        }
+        return new GwmApiException(((int)response.StatusCode).ToString(),
+            String.IsNullOrWhiteSpace(content) ? "empty response body" : Snippet(content),
+            response.StatusCode, response.RequestMessage?.RequestUri?.AbsolutePath);
+    }
+
+    private static string Snippet(string content)
+    {
+        var single = content.ReplaceLineEndings(" ").Trim();
+        return single.Length <= 200 ? single : single[..200] + "...";
+    }
+
+    private void CheckResponse(GwmResponse response, HttpResponseMessage httpResponse)
+    {
+        if (response.Code == "000000") return;
+        throw new GwmApiException(response.Code, response.Description,
+            httpResponse.IsSuccessStatusCode ? null : httpResponse.StatusCode,
+            httpResponse.RequestMessage?.RequestUri?.AbsolutePath);
     }
 
     private class GwmResponse
